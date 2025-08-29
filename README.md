@@ -23,3 +23,6 @@ A cross-platform mobile habit-tracking app (currently in beta) designed to help 
 
 ## Status
 Currently in beta testing. Demo and source code available upon request.
+
+## Screenshots
+SCR-20250828-seuf.png
