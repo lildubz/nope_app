@@ -33,8 +33,8 @@ Currently in beta testing. Demo and source code available upon request.
 ### Streak & NOPE Button
 ![](SCR-20250828-sfxs.png)
 
-### Calendar Overview
+### Add Habit
 ![](SCR-20250828-sgbk.png)
 
-### Habit Details / Recent Urges
+### Calendar Overview
 ![](SCR-20250828-sggi.png)
