@@ -28,13 +28,13 @@ Currently in beta testing. Demo and source code available upon request.
 ## Screenshots
 
 ### Home Screen
-![Home Screen](SCR-20250828-seuf.png)
+![](SCR-20250828-seuf.png)
 
 ### Streak & NOPE Button
-![Streak View](SCR-20250828-sfxs.png)
+![](SCR-20250828-sfxs.png)
 
 ### Calendar Overview
-![Calendar Overview](SCR-20250828-sgbk.png)
+![](SCR-20250828-sgbk.png)
 
 ### Habit Details / Recent Urges
-![Habit Details](SCR-20250828-sggi.png)
+![](SCR-20250828-sggi.png)
