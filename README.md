@@ -27,7 +27,7 @@ Currently in beta testing. Demo and source code available upon request.
 ## Screenshots
 ## Screenshots
 
-### Home Screen
+### Feedback Message
 ![](SCR-20250828-seuf.png)
 
 ### Streak & NOPE Button
