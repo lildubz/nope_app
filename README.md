@@ -25,4 +25,16 @@ A cross-platform mobile habit-tracking app (currently in beta) designed to help 
 Currently in beta testing. Demo and source code available upon request.
 
 ## Screenshots
-(SCR-20250828-seuf.png)
+## Screenshots
+
+### Home Screen
+![Home Screen](SCR-20250828-seuf.png)
+
+### Streak & NOPE Button
+![Streak View](SCR-20250828-sfxs.png)
+
+### Calendar Overview
+![Calendar Overview](SCR-20250828-sgbk.png)
+
+### Habit Details / Recent Urges
+![Habit Details](SCR-20250828-sggi.png)
