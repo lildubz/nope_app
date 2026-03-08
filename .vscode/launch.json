@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "nope_app",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "nope_app (profile mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "nope_app (release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "shared_preferences_foundation",
+            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "shared_preferences_foundation (profile mode)",
+            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "shared_preferences_foundation (release mode)",
+            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        }
+    ]
+}
