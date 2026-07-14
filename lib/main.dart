@@ -659,130 +659,277 @@ class _AddHabitSheet extends StatefulWidget {
 
 class _AddHabitSheetState extends State<_AddHabitSheet> {
   final nameCtrl = TextEditingController();
-  final streakCtrl = TextEditingController();
   Color selectedColor = presetColors["Blue"]!;
+  int streak = 0;
 
   @override
   void dispose() {
     nameCtrl.dispose();
-    streakCtrl.dispose();
     super.dispose();
+  }
+
+  void _submit() {
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    HapticFeedback.mediumImpact();
+    Navigator.pop(
+      context,
+      Habit(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        name: name,
+        streak: streak,
+        longestStreak: streak,
+        colorValue: selectedColor.value,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF111111),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111111),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
       ),
       padding: EdgeInsets.fromLTRB(
-        24, 16, 24, MediaQuery.of(context).viewInsets.bottom + 32,
+        22, 14, 22, MediaQuery.of(context).viewInsets.bottom + 28,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Handle
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white12,
-                borderRadius: BorderRadius.circular(2),
+          // Handle + close
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
+            ],
+          ),
+          const SizedBox(height: 22),
+
+          // Live preview row
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 250),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  selectedColor.withOpacity(0.18),
+                  selectedColor.withOpacity(0.04),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: selectedColor.withOpacity(0.25)),
+            ),
+            child: Row(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: selectedColor,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(color: selectedColor.withOpacity(0.45), blurRadius: 16, spreadRadius: 1),
+                    ],
+                  ),
+                  child: const Icon(Icons.bolt_rounded, color: Colors.white, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        nameCtrl.text.trim().isEmpty ? "New habit" : nameCtrl.text.trim(),
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Starting streak: $streak day${streak == 1 ? '' : 's'}",
+                        style: const TextStyle(fontSize: 12.5, color: Colors.white54, fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 20),
+
+          const SizedBox(height: 24),
           const Text(
-            "New Habit",
-            style: TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.w900,
-              letterSpacing: -1,
-            ),
+            "NAME",
+            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 8),
           _StyledTextField(
             controller: nameCtrl,
-            label: "Habit name",
-            hint: "e.g., No Vaping",
+            hint: "e.g. Less social media, No junk food, etc.",
+            icon: Icons.edit_rounded,
+            onChanged: () => setState(() {}),
           ),
-          const SizedBox(height: 12),
-          _StyledTextField(
-            controller: streakCtrl,
-            label: "Current streak (days resisted)",
-            hint: "0",
-            keyboardType: TextInputType.number,
-          ),
-          const SizedBox(height: 20),
+
+          const SizedBox(height: 22),
           const Text(
-            "Color",
-            style: TextStyle(fontSize: 13, color: Colors.white54, fontWeight: FontWeight.w600),
+            "STARTING STREAK",
+            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Row(
+              children: [
+                _StepperButton(
+                  icon: Icons.remove_rounded,
+                  onTap: streak > 0 ? () => setState(() => streak--) : null,
+                ),
+                Expanded(
+                  child: Center(
+                    child: Text(
+                      "$streak",
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                    ),
+                  ),
+                ),
+                _StepperButton(
+                  icon: Icons.add_rounded,
+                  onTap: () => setState(() => streak++),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 22),
+          const Text(
+            "COLOR",
+            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
           const SizedBox(height: 10),
           Row(
             children: presetColors.entries.map((entry) {
               final isSelected = entry.value == selectedColor;
-              return GestureDetector(
-                onTap: () => setState(() => selectedColor = entry.value),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: isSelected ? 42 : 36,
-                  height: isSelected ? 42 : 36,
-                  margin: const EdgeInsets.only(right: 10),
-                  decoration: BoxDecoration(
-                    color: entry.value,
-                    shape: BoxShape.circle,
-                    boxShadow: isSelected
-                        ? [BoxShadow(color: entry.value.withOpacity(0.5), blurRadius: 12, spreadRadius: 2)]
-                        : [],
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() => selectedColor = entry.value);
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: entry.value.withOpacity(isSelected ? 0.22 : 0.08),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: isSelected ? entry.value : Colors.transparent,
+                          width: 2,
+                        ),
+                      ),
+                      child: Center(
+                        child: AnimatedScale(
+                          duration: const Duration(milliseconds: 200),
+                          scale: isSelected ? 1.0 : 0.85,
+                          child: Container(
+                            width: 18,
+                            height: 18,
+                            decoration: BoxDecoration(
+                              color: entry.value,
+                              shape: BoxShape.circle,
+                              boxShadow: isSelected
+                                  ? [BoxShadow(color: entry.value.withOpacity(0.6), blurRadius: 8)]
+                                  : [],
+                            ),
+                            child: isSelected
+                                ? const Icon(Icons.check, color: Colors.white, size: 12)
+                                : null,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                  child: isSelected
-                      ? const Icon(Icons.check, color: Colors.white, size: 18)
-                      : null,
                 ),
               );
             }).toList(),
           ),
-          const SizedBox(height: 24),
-          _PressableButton(
-            onTap: () {
-              final name = nameCtrl.text.trim();
-              if (name.isEmpty) return;
-              final streak = int.tryParse(streakCtrl.text.trim()) ?? 0;
-              HapticFeedback.mediumImpact();
-              Navigator.pop(
-                context,
-                Habit(
-                  id: DateTime.now().millisecondsSinceEpoch.toString(),
-                  name: name,
-                  streak: streak,
-                  longestStreak: streak,
-                  colorValue: selectedColor.value,
-                ),
-              );
-            },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 18),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Center(
-                child: Text(
-                  "Add Habit",
-                  style: TextStyle(
-                    color: Color(0xFF080808),
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.3,
+
+          const SizedBox(height: 28),
+          Row(
+            children: [
+              Expanded(
+                child: _PressableButton(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 17),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.06),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Center(
+                      child: Text(
+                        "Cancel",
+                        style: TextStyle(color: Colors.white60, fontSize: 15, fontWeight: FontWeight.w700),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 2,
+                child: _PressableButton(
+                  onTap: _submit,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 17),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [selectedColor, selectedColor.withOpacity(0.7)],
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(color: selectedColor.withOpacity(0.35), blurRadius: 16, offset: const Offset(0, 6)),
+                      ],
+                    ),
+                    child: const Center(
+                      child: Text(
+                        "Add Habit",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -790,17 +937,45 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   }
 }
 
+class _StepperButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  const _StepperButton({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(enabled ? 0.08 : 0.02),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon, size: 18, color: enabled ? Colors.white : Colors.white24),
+      ),
+    );
+  }
+}
+
 class _StyledTextField extends StatelessWidget {
   final TextEditingController controller;
-  final String label;
+  final String? label;
   final String hint;
   final TextInputType keyboardType;
+  final IconData? icon;
+  final VoidCallback? onChanged;
 
   const _StyledTextField({
     required this.controller,
-    required this.label,
+    this.label,
     required this.hint,
     this.keyboardType = TextInputType.text,
+    this.icon,
+    this.onChanged,
   });
 
   @override
@@ -808,20 +983,23 @@ class _StyledTextField extends StatelessWidget {
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
-      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500),
+      onChanged: onChanged == null ? null : (_) => onChanged!(),
+      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        prefixIcon: icon == null ? null : Icon(icon, size: 19, color: Colors.white38),
         labelStyle: const TextStyle(color: Colors.white38),
-        hintStyle: const TextStyle(color: Colors.white24),
+        hintStyle: const TextStyle(color: Colors.white24, fontWeight: FontWeight.w500),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(color: Colors.white12),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(color: Colors.white38),
         ),
+        contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
         filled: true,
         fillColor: Colors.white.withOpacity(0.05),
       ),
