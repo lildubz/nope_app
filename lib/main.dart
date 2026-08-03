@@ -297,7 +297,7 @@ class _IntroFeature extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // MODEL
 // ─────────────────────────────────────────────────────────────────────────────
-class Habit {
+class Habit extends ChangeNotifier {
   String id;
   String name;
   String tonePack;
@@ -344,6 +344,31 @@ class Habit {
     urgeLog.add(now.toIso8601String());
     if (urgeLog.length > 50) urgeLog.removeAt(0);
     return true;
+  }
+
+  /// Handles a NOPE tap end-to-end and notifies only listeners of *this*
+  /// habit — the parent list never needs to rebuild for this.
+  /// Returns true if the streak actually incremented (vs. already tapped today).
+  bool nope(DateTime now, String Function(Habit) messageBuilder) {
+    refreshForToday(now);
+    final incremented = registerNope(now);
+    lastLine = incremented
+        ? messageBuilder(this)
+        : "Already counted today. Come back tomorrow ✌️";
+    notifyListeners();
+    return incremented;
+  }
+
+  void reset() {
+    streak = 0;
+    lastTapMillis = 0;
+    lastLine = "Reset. New chapter starts now.";
+    notifyListeners();
+  }
+
+  void setColor(Color c) {
+    colorValue = c.value;
+    notifyListeners();
   }
 
   Map<String, dynamic> toJson() => {
@@ -467,16 +492,15 @@ class _NopeHomeState extends State<NopeHome> {
 
   void _deleteHabit(Habit h) {
     setState(() => habits.removeWhere((x) => x.id == h.id));
+    h.dispose();
     _saveHabits();
   }
 
   void _resetHabit(Habit h) {
     HapticFeedback.mediumImpact();
-    setState(() {
-      h.streak = 0;
-      h.lastTapMillis = 0;
-      h.lastLine = "Reset. New chapter starts now.";
-    });
+    // Habit.reset() calls notifyListeners() itself — only the AnimatedBuilder
+    // wrapping this one card rebuilds, so no setState() here.
+    h.reset();
     _saveHabits();
   }
 
@@ -490,23 +514,20 @@ class _NopeHomeState extends State<NopeHome> {
 
   void _pressNope(Habit h) {
     final now = DateTime.now();
-    setState(() {
-      h.refreshForToday(now);
-      final incremented = h.registerNope(now);
-      if (incremented) {
-        HapticFeedback.heavyImpact();
-        _confettiController.play();
-        h.lastLine = _adaptiveMessage(h);
-      } else {
-        HapticFeedback.lightImpact();
-        h.lastLine = "Already counted today. Come back tomorrow ✌️";
-      }
-    });
+    // No setState() — h.nope() notifies only this habit's own listeners,
+    // so the other cards in the list never rebuild.
+    final incremented = h.nope(now, _adaptiveMessage);
+    if (incremented) {
+      HapticFeedback.heavyImpact();
+      _confettiController.play();
+    } else {
+      HapticFeedback.lightImpact();
+    }
     _saveHabits();
   }
 
   void _changeColor(Habit h, Color newColor) {
-    setState(() => h.colorValue = newColor.value);
+    h.setColor(newColor);
     _saveHabits();
   }
 
@@ -544,11 +565,8 @@ class _NopeHomeState extends State<NopeHome> {
               onPressed: () {
                 HapticFeedback.mediumImpact();
                 for (final h in habits) {
-                  h.streak = 0;
-                  h.lastTapMillis = 0;
-                  h.lastLine = "Reset. New chapter starts now.";
+                  h.reset(); // notifies only that habit's own card
                 }
-                setState(() {});
                 _saveHabits();
               },
             ),
@@ -630,7 +648,7 @@ class _NopeHomeState extends State<NopeHome> {
                   maxBlastForce: 25,
                   minBlastForce: 8,
                   emissionFrequency: 0.04,
-                  numberOfParticles: 30,
+                  numberOfParticles: 18,
                   gravity: 0.35,
                   colors: [
                     Colors.white,
@@ -1029,6 +1047,19 @@ class _HabitCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // RepaintBoundary keeps this card's paints isolated from its siblings.
+    // AnimatedBuilder subscribes directly to `habit` (a ChangeNotifier), so
+    // this is the *only* widget that rebuilds when this habit changes —
+    // tapping NOPE on one card no longer touches the other cards at all.
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: habit,
+        builder: (context, _) => _buildCard(context),
+      ),
+    );
+  }
+
+  Widget _buildCard(BuildContext context) {
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
     final lastUrges = habit.urgeLog.reversed.take(3).toList();
