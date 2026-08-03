@@ -1307,7 +1307,7 @@ class _NopeButton extends StatefulWidget {
   State<_NopeButton> createState() => _NopeButtonState();
 }
 
-class _NopeButtonState extends State<_NopeButton> with SingleTickerProviderStateMixin {
+class _NopeButtonState extends State<_NopeButton> {
   bool _pressed = false;
 
   @override
@@ -1410,13 +1410,24 @@ class _CalendarViewState extends State<CalendarView> {
   DateTime _focusedDay = DateTime.now();
   DateTime? _selectedDay;
 
-  List<Habit> habitsOnDay(DateTime day) {
-    return widget.habits.where((h) {
-      return h.urgeLog.any((iso) {
+  // Precomputed once (not on every markerBuilder call) so opening/paging the
+  // calendar doesn't re-parse every urgeLog entry for every visible day cell.
+  late final Map<DateTime, List<Habit>> _habitsByDay = _buildIndex();
+
+  Map<DateTime, List<Habit>> _buildIndex() {
+    final index = <DateTime, List<Habit>>{};
+    for (final h in widget.habits) {
+      for (final iso in h.urgeLog) {
         final dt = DateTime.parse(iso);
-        return dt.year == day.year && dt.month == day.month && dt.day == day.day;
-      });
-    }).toList();
+        final key = DateTime(dt.year, dt.month, dt.day);
+        (index[key] ??= []).add(h);
+      }
+    }
+    return index;
+  }
+
+  List<Habit> habitsOnDay(DateTime day) {
+    return _habitsByDay[DateTime(day.year, day.month, day.day)] ?? const [];
   }
 
   @override
@@ -1504,34 +1515,42 @@ class _CalendarViewState extends State<CalendarView> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    "Resisted on ${_selectedDay!.month}/${_selectedDay!.day}/${_selectedDay!.year}",
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  ...habitsOnDay(_selectedDay!).map((h) => Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
+                  Builder(builder: (context) {
+                    final onDay = habitsOnDay(_selectedDay!);
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          margin: const EdgeInsets.only(right: 10),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Color(h.colorValue),
+                        Text(
+                          "Resisted on ${_selectedDay!.month}/${_selectedDay!.day}/${_selectedDay!.year}",
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 16,
+                            letterSpacing: -0.3,
                           ),
                         ),
-                        Text(h.name, style: const TextStyle(color: Colors.white70)),
+                        const SizedBox(height: 10),
+                        ...onDay.map((h) => Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 10,
+                                height: 10,
+                                margin: const EdgeInsets.only(right: 10),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Color(h.colorValue),
+                                ),
+                              ),
+                              Text(h.name, style: const TextStyle(color: Colors.white70)),
+                            ],
+                          ),
+                        )),
+                        if (onDay.isEmpty)
+                          const Text("Nothing logged.", style: TextStyle(color: Colors.white38)),
                       ],
-                    ),
-                  )),
-                  if (habitsOnDay(_selectedDay!).isEmpty)
-                    const Text("Nothing logged.", style: TextStyle(color: Colors.white38)),
+                    );
+                  }),
                 ],
               ),
             ),
