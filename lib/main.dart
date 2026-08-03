@@ -32,7 +32,11 @@ class NopeApp extends StatelessWidget {
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF080808),
         snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
-        textTheme: ThemeData.dark().textTheme.apply(fontFamily: 'Helvetica Neue'),
+        // 'Helvetica Neue' isn't bundled as an asset font (no `fonts:` entry in
+        // pubspec.yaml), so every Text widget was forcing Skia to run a slow
+        // font-fallback resolution on first layout -- most visible as a stutter
+        // the moment a text-heavy screen first appears (intro screen, add-habit
+        // sheet). Falling back to the platform default font fixes that.
       ),
       home: const AppEntry(),
       debugShowCheckedModeBanner: false,
