@@ -2,22 +2,421 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:confetti/confetti.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:table_calendar/table_calendar.dart';
+import 'package:timezone/data/latest_all.dart' as tz_data;
+import 'package:timezone/timezone.dart' as tz;
 
 void main() {
   runApp(const NopeApp());
+  _loadThemeMode();
+  _setupDailyReminder();
 }
 
 final Map<String, Color> presetColors = {
-  "Blue": const Color(0xFF4A9EFF),
-  "Red": const Color(0xFFFF4A6B),
-  "Green": const Color(0xFF4AFF9E),
-  "Orange": const Color(0xFFFF9E4A),
-  "Purple": const Color(0xFFB44AFF),
+  "Blue": const Color(0xFF5490D7),
+  "Red": const Color(0xFFD7546C),
+  "Green": const Color(0xFF547B66),
+  "Orange": const Color(0xFFD79054),
+  "Purple": const Color(0xFFA054D7),
 };
+
+// App-wide accent color. Used for the FAB, calendar selection, and focused
+// inputs -- anywhere the UI needs a fixed accent rather than a per-habit color.
+const Color kAccent = Color(0xFF5490D7); // Blue
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THEME (light / dark)
+// ─────────────────────────────────────────────────────────────────────────────
+// Global so the toggle button (wherever it lives) doesn't need a callback
+// threaded all the way down from NopeApp -- it just flips this and every
+// screen listening via AppColors.of(context)/ValueListenableBuilder updates.
+final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier(ThemeMode.dark);
+
+Future<void> _loadThemeMode() async {
+  final prefs = await SharedPreferences.getInstance();
+  final isLight = prefs.getBool('isLightMode') ?? false;
+  themeModeNotifier.value = isLight ? ThemeMode.light : ThemeMode.dark;
+}
+
+Future<void> toggleThemeMode() async {
+  final next = themeModeNotifier.value == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+  themeModeNotifier.value = next;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('isLightMode', next == ThemeMode.light);
+}
+
+// Semantic palette: every screen pulls colors from here instead of hardcoding
+// hex values, so the whole app (not just the scaffold background) responds
+// to the light/dark toggle.
+class AppColors {
+  final Color bg;
+  final Color card;
+  final Color dialogBg;
+  final Color raised;
+  final Color ink; // base text/icon color -- use .withValues(alpha: ) for secondary/tertiary/faint
+
+  const AppColors({
+    required this.bg,
+    required this.card,
+    required this.dialogBg,
+    required this.raised,
+    required this.ink,
+  });
+
+  static const dark = AppColors(
+    bg: Color(0xFF080808),
+    card: Color(0xFF111111),
+    dialogBg: Color(0xFF141414),
+    raised: Color(0xFF1A1A1A),
+    ink: Colors.white,
+  );
+
+  static const light = AppColors(
+    bg: Color(0xFFF6F6F8),
+    card: Colors.white,
+    dialogBg: Colors.white,
+    raised: Color(0xFFEFEFF2),
+    ink: Color(0xFF0B0B0C),
+  );
+
+  static AppColors of(BuildContext context) {
+    return Theme.of(context).brightness == Brightness.dark ? dark : light;
+  }
+}
+
+ThemeData buildAppTheme(Brightness brightness) {
+  final colors = brightness == Brightness.dark ? AppColors.dark : AppColors.light;
+  final base = brightness == Brightness.dark ? ThemeData.dark() : ThemeData.light();
+  return base.copyWith(
+    brightness: brightness,
+    scaffoldBackgroundColor: colors.bg,
+    // Every AlertDialog/showDialog call below sets its own backgroundColor
+    // explicitly via AppColors, so we don't rely on (or risk depending on
+    // a possibly-deprecated) ThemeData dialog background field here.
+    snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    colorScheme: base.colorScheme.copyWith(primary: kAccent, secondary: kAccent),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY REMINDER (local push notification, mobile only)
+// ─────────────────────────────────────────────────────────────────────────────
+// A local notification -- unlike the welcome-back dialog and the in-app risk
+// banner -- can nudge someone who never opens the app that day. It's mobile
+// only: there's no reliable equivalent for a browser tab that isn't open
+// (that needs a real push service + backend), so this deliberately no-ops on
+// web rather than pretending to work there.
+final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
+
+Future<void> _setupDailyReminder() async {
+  if (kIsWeb) return;
+  try {
+    tz_data.initializeTimeZones();
+    final localTz = await FlutterTimezone.getLocalTimezone();
+    tz.setLocalLocation(tz.getLocation(localTz));
+  } catch (_) {
+    // If timezone lookup fails for any reason, fall back to whatever the
+    // timezone package defaults to (UTC) rather than crash startup over a
+    // reminder notification.
+  }
+
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const darwinInit = DarwinInitializationSettings(
+    requestAlertPermission: true,
+    requestBadgePermission: true,
+    requestSoundPermission: true,
+  );
+
+  try {
+    await _notificationsPlugin.initialize(
+      const InitializationSettings(android: androidInit, iOS: darwinInit, macOS: darwinInit),
+    );
+
+    final androidImpl = _notificationsPlugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    await androidImpl?.requestNotificationsPermission();
+
+    await _notificationsPlugin.zonedSchedule(
+      0,
+      "Don't lose your streak",
+      "You haven't hit NOPE today yet — a minute now keeps it alive.",
+      _nextDailyReminderTime(hour: 20, minute: 0),
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'daily_reminder',
+          'Daily reminder',
+          channelDescription: "Reminds you if you haven't checked in yet today",
+          importance: Importance.defaultImportance,
+        ),
+        iOS: DarwinNotificationDetails(),
+        macOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.time,
+    );
+  } catch (_) {
+    // Best-effort: a habit-reminder notification failing to schedule (e.g.
+    // permission denied) shouldn't take down the rest of the app.
+  }
+}
+
+tz.TZDateTime _nextDailyReminderTime({required int hour, required int minute}) {
+  final now = tz.TZDateTime.now(tz.local);
+  var scheduled = tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+  if (scheduled.isBefore(now)) {
+    scheduled = scheduled.add(const Duration(days: 1));
+  }
+  return scheduled;
+}
+
+// Icon choices offered when creating/editing a habit -- picked to cover
+// common things people are trying to resist or build, so the avatar in the
+// add-habit sheet and habit card actually means something. "Block" (a stop
+// sign) is first and doubles as the default for new/legacy habits.
+const List<IconData> presetIcons = [
+  Icons.block,
+  Icons.smoking_rooms,
+  Icons.local_bar,
+  Icons.fastfood,
+  Icons.local_cafe,
+  Icons.phone_android,
+  Icons.sports_esports,
+  Icons.shopping_bag,
+  Icons.nightlight_round,
+  Icons.self_improvement,
+  Icons.fitness_center,
+];
+
+IconData habitIconForCodePoint(int codePoint) {
+  return presetIcons.firstWhere(
+    (i) => i.codePoint == codePoint,
+    orElse: () => presetIcons.first,
+  );
+}
+
+// Opens a plain RGB-slider color picker and resolves with the chosen color,
+// or null if cancelled. Shared by the add-habit sheet and the habit-card
+// customize dialog so either flow can pick any color, not just the five
+// presets. Deliberately no extra package -- three sliders is enough control
+// without pulling in a whole HSV-wheel dependency.
+Future<Color?> _pickCustomColor(BuildContext context, Color initial) {
+  return showDialog<Color>(
+    context: context,
+    builder: (dialogContext) {
+      int r = initial.red;
+      int g = initial.green;
+      int b = initial.blue;
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          final current = Color.fromARGB(255, r, g, b);
+          return AlertDialog(
+            backgroundColor: AppColors.of(context).dialogBg,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text("Custom color", style: dialogTitleStyle(context)),
+            content: SizedBox(
+              width: 280,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 56,
+                    height: 56,
+                    margin: const EdgeInsets.only(bottom: 18),
+                    decoration: BoxDecoration(
+                      color: current,
+                      shape: BoxShape.circle,
+                      boxShadow: [BoxShadow(color: current.withValues(alpha: 0.5), blurRadius: 16, spreadRadius: 1)],
+                    ),
+                  ),
+                  _ColorChannelSlider(
+                    label: "R",
+                    value: r,
+                    trackColor: Colors.redAccent,
+                    onChanged: (v) => setDialogState(() => r = v),
+                  ),
+                  _ColorChannelSlider(
+                    label: "G",
+                    value: g,
+                    trackColor: Colors.greenAccent,
+                    onChanged: (v) => setDialogState(() => g = v),
+                  ),
+                  _ColorChannelSlider(
+                    label: "B",
+                    value: b,
+                    trackColor: Colors.lightBlueAccent,
+                    onChanged: (v) => setDialogState(() => b = v),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("Cancel"),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: current, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(context, current),
+                child: const Text("Select"),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+class _ColorChannelSlider extends StatelessWidget {
+  final String label;
+  final int value;
+  final Color trackColor;
+  final ValueChanged<int> onChanged;
+
+  const _ColorChannelSlider({
+    required this.label,
+    required this.value,
+    required this.trackColor,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 16,
+          child: Text(
+            label,
+            style: TextStyle(color: trackColor, fontWeight: FontWeight.w800, fontSize: 13),
+          ),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(trackHeight: 3),
+            child: Slider(
+              value: value.toDouble(),
+              min: 0,
+              max: 255,
+              activeColor: trackColor,
+              inactiveColor: trackColor.withValues(alpha: 0.15),
+              onChanged: (v) => onChanged(v.round()),
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 32,
+          child: Text(
+            "$value",
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: AppColors.of(context).ink.withValues(alpha: 0.54),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// A small rainbow-ring icon used on both "pick a custom color" buttons below
+// so it reads as "more colors" even before anything custom is chosen.
+const SweepGradient _customSwatchGradient = SweepGradient(colors: [
+  Color(0xFFD7546C),
+  Color(0xFFB6A02B),
+  Color(0xFF547B66),
+  Color(0xFF5490D7),
+  Color(0xFFA054D7),
+  Color(0xFFD7546C),
+]);
+
+// Rounded-rect swatch matching the add-habit sheet's preset color row.
+Widget _customColorCardSwatch({
+  required Color current,
+  required bool isCustom,
+  required VoidCallback onTap,
+  required Color ink,
+}) {
+  return Expanded(
+    child: GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        height: 52,
+        decoration: BoxDecoration(
+          color: isCustom ? current.withValues(alpha: 0.22) : ink.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: isCustom ? current : Colors.transparent, width: 2),
+        ),
+        child: Center(
+          child: Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isCustom ? current : null,
+              gradient: isCustom ? null : _customSwatchGradient,
+              boxShadow: isCustom ? [BoxShadow(color: current.withValues(alpha: 0.6), blurRadius: 8)] : [],
+            ),
+            child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 10),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// Plain circle swatch matching the habit-card customize dialog's color row.
+Widget _customColorCircleSwatch({
+  required Color current,
+  required bool isCustom,
+  required VoidCallback onTap,
+}) {
+  return GestureDetector(
+    onTap: onTap,
+    child: Container(
+      width: 42,
+      height: 42,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: isCustom ? current : null,
+        gradient: isCustom ? null : _customSwatchGradient,
+        border: Border.all(color: isCustom ? Colors.white : Colors.transparent, width: 3),
+      ),
+      child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 18),
+    ),
+  );
+}
+
+bool _isPresetColor(Color c) => presetColors.values.any((p) => p.value == c.value);
+
+// Shared dialog typography -- every showDialog/AlertDialog in the app routes
+// its title and body through these two so no popup ever drifts from the
+// app's bold-header, plain-body look (the default AlertDialog text theme is
+// much lighter-weight and reads as a different font at a glance).
+TextStyle dialogTitleStyle(BuildContext context) => TextStyle(
+      fontSize: 19,
+      fontWeight: FontWeight.w800,
+      letterSpacing: -0.4,
+      color: AppColors.of(context).ink,
+    );
+
+TextStyle dialogBodyStyle(BuildContext context) => TextStyle(
+      fontSize: 14.5,
+      fontWeight: FontWeight.w500,
+      height: 1.35,
+      color: AppColors.of(context).ink.withValues(alpha: 0.75),
+    );
 
 // ─────────────────────────────────────────────────────────────────────────────
 // APP
@@ -27,19 +426,23 @@ class NopeApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Nope.',
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF080808),
-        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
-        // 'Helvetica Neue' isn't bundled as an asset font (no `fonts:` entry in
-        // pubspec.yaml), so every Text widget was forcing Skia to run a slow
-        // font-fallback resolution on first layout -- most visible as a stutter
-        // the moment a text-heavy screen first appears (intro screen, add-habit
-        // sheet). Falling back to the platform default font fixes that.
-      ),
-      home: const AppEntry(),
-      debugShowCheckedModeBanner: false,
+    // 'Helvetica Neue' isn't bundled as an asset font (no `fonts:` entry in
+    // pubspec.yaml), so we deliberately don't set a custom fontFamily here --
+    // doing so used to force a slow Skia font-fallback resolution on every
+    // Text widget's first layout (worst on text-heavy screens like the intro
+    // and add-habit sheet). Platform default font avoids that.
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (context, mode, _) {
+        return MaterialApp(
+          title: 'Nope.',
+          themeMode: mode,
+          theme: buildAppTheme(Brightness.light),
+          darkTheme: buildAppTheme(Brightness.dark),
+          home: const AppEntry(),
+          debugShowCheckedModeBanner: false,
+        );
+      },
     );
   }
 }
@@ -75,9 +478,9 @@ class _AppEntryState extends State<AppEntry> {
     if (mounted) {
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const NopeHome(),
+          pageBuilder: (_, _, _) => const NopeHome(),
           transitionDuration: const Duration(milliseconds: 600),
-          transitionsBuilder: (_, anim, __, child) =>
+          transitionsBuilder: (_, anim, _, child) =>
               FadeTransition(opacity: anim, child: child),
         ),
       );
@@ -87,7 +490,7 @@ class _AppEntryState extends State<AppEntry> {
   @override
   Widget build(BuildContext context) {
     if (_showIntro == null) {
-      return const Scaffold(backgroundColor: Color(0xFF080808));
+      return Scaffold(backgroundColor: AppColors.of(context).bg);
     }
     if (_showIntro!) {
       return IntroScreen(onComplete: _onIntroComplete);
@@ -113,7 +516,6 @@ class _IntroScreenState extends State<IntroScreen>
   late AnimationController _subCtrl;
   late AnimationController _btnCtrl;
   late AnimationController _lineCtrl;
-
   late Animation<double> _titleFade;
   late Animation<Offset> _titleSlide;
   late Animation<double> _subFade;
@@ -123,7 +525,6 @@ class _IntroScreenState extends State<IntroScreen>
   @override
   void initState() {
     super.initState();
-
     _titleCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
     _subCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 600));
     _btnCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
@@ -162,9 +563,9 @@ class _IntroScreenState extends State<IntroScreen>
   @override
   Widget build(BuildContext context) {
     final w = MediaQuery.of(context).size.width;
-
+    final colors = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFF080808),
+      backgroundColor: colors.bg,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -172,61 +573,54 @@ class _IntroScreenState extends State<IntroScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Spacer(flex: 3),
-
               // Big title
               FadeTransition(
                 opacity: _titleFade,
                 child: SlideTransition(
                   position: _titleSlide,
-                  child: const Text(
+                  child: Text(
                     "nope.",
                     style: TextStyle(
                       fontSize: 88,
                       fontWeight: FontWeight.w900,
-                      color: Colors.white,
+                      color: colors.ink,
                       letterSpacing: -4,
                       height: 1.0,
                     ),
                   ),
                 ),
               ),
-
               const SizedBox(height: 16),
-
               // Animated line
               AnimatedBuilder(
                 animation: _lineWidth,
-                builder: (_, __) => Container(
+                builder: (_, _) => Container(
                   height: 2,
                   width: _lineWidth.value * (w - 64),
-                  color: Colors.white,
+                  color: colors.ink,
                 ),
               ),
-
               const SizedBox(height: 20),
-
               // Tagline
               FadeTransition(
                 opacity: _subFade,
-                child: const Text(
+                child: Text(
                   "resist the urge.\ntrack the streak.\ngrow the streak.",
                   style: TextStyle(
                     fontSize: 20,
-                    color: Color(0xFF888888),
+                    color: colors.ink.withValues(alpha: 0.55),
                     fontWeight: FontWeight.w400,
                     height: 1.6,
                     letterSpacing: -0.3,
                   ),
                 ),
               ),
-
               const Spacer(flex: 2),
-
               // Features
               FadeTransition(
                 opacity: _subFade,
-                child: Column(
-                  children: const [
+                child: const Column(
+                  children: [
                     _IntroFeature(icon: Icons.block, text: "Hit NOPE once a day per habit"),
                     SizedBox(height: 14),
                     _IntroFeature(icon: Icons.local_fire_department, text: "Build streaks. Don't break the chain."),
@@ -235,10 +629,9 @@ class _IntroScreenState extends State<IntroScreen>
                   ],
                 ),
               ),
-
               const Spacer(flex: 2),
-
-              // CTA button
+              // CTA button -- inverted (ink bg / bg text) so it stays high
+              // contrast in both light and dark mode.
               FadeTransition(
                 opacity: _btnFade,
                 child: _PressableButton(
@@ -247,14 +640,14 @@ class _IntroScreenState extends State<IntroScreen>
                     width: double.infinity,
                     padding: const EdgeInsets.symmetric(vertical: 20),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: colors.ink,
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    child: const Center(
+                    child: Center(
                       child: Text(
                         "let's go →",
                         style: TextStyle(
-                          color: Color(0xFF080808),
+                          color: colors.bg,
                           fontSize: 18,
                           fontWeight: FontWeight.w800,
                           letterSpacing: -0.3,
@@ -264,7 +657,6 @@ class _IntroScreenState extends State<IntroScreen>
                   ),
                 ),
               ),
-
               const SizedBox(height: 48),
             ],
           ),
@@ -281,14 +673,15 @@ class _IntroFeature extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Row(
       children: [
-        Icon(icon, color: Colors.white38, size: 20),
+        Icon(icon, color: colors.ink.withValues(alpha: 0.38), size: 20),
         const SizedBox(width: 12),
         Text(
           text,
-          style: const TextStyle(
-            color: Color(0xFF666666),
+          style: TextStyle(
+            color: colors.ink.withValues(alpha: 0.6),
             fontSize: 15,
             fontWeight: FontWeight.w400,
           ),
@@ -309,6 +702,7 @@ class Habit extends ChangeNotifier {
   int longestStreak;
   int lastTapMillis;
   int colorValue;
+  int iconCodePoint;
   List<String> urgeLog;
   String? lastLine;
 
@@ -321,7 +715,8 @@ class Habit extends ChangeNotifier {
     this.lastTapMillis = 0,
     List<String>? urgeLog,
     this.lastLine,
-    this.colorValue = 0xFF4A9EFF,
+    this.colorValue = 0xFF5490D7, // Blue — default habit color
+    this.iconCodePoint = 0, // 0 == "use the default (block/stop sign)" — see habitIconForCodePoint
   }) : urgeLog = urgeLog ?? [];
 
   DateTime? get lastTap =>
@@ -375,6 +770,11 @@ class Habit extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setIcon(IconData icon) {
+    iconCodePoint = icon.codePoint;
+    notifyListeners();
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -385,6 +785,7 @@ class Habit extends ChangeNotifier {
         'urgeLog': urgeLog,
         'lastLine': lastLine,
         'colorValue': colorValue,
+        'iconCodePoint': iconCodePoint,
       };
 
   factory Habit.fromJson(Map<String, dynamic> j) => Habit(
@@ -396,8 +797,103 @@ class Habit extends ChangeNotifier {
         lastTapMillis: (j['lastTapMillis'] as int?) ?? 0,
         urgeLog: (j['urgeLog'] as List?)?.map((e) => e.toString()).toList() ?? [],
         lastLine: j['lastLine'] as String?,
-        colorValue: (j['colorValue'] as int?) ?? 0xFF4A9EFF,
+        colorValue: (j['colorValue'] as int?) ?? 0xFF5490D7,
+        iconCodePoint: (j['iconCodePoint'] as int?) ?? 0,
       );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESET CONFIRMATION — shared two-step gate for any destructive streak reset
+// ─────────────────────────────────────────────────────────────────────────────
+/// Encapsulates the "friction" flow for clearing a streak: a reflective
+/// question first, then a hard confirmation. Both the per-habit reset and
+/// the reset-all action route through the same [confirm] call so the copy
+/// and step order only live in one place. When [hasProgress] is false there
+/// is nothing to lose, so answering "No" just shows an acknowledgment
+/// instead of a reset confirmation -- and nothing actually resets.
+class ResetConfirmation {
+  ResetConfirmation._(); // not instantiated — call sites use the static API
+
+  static Future<bool> confirm(
+    BuildContext context, {
+    required String subtitle,
+    required String sureBody,
+    bool hasProgress = true,
+  }) async {
+    final gaveIn = await _dialog(
+      context,
+      title: "Have you resisted until this point?",
+      body: subtitle,
+      actions: (dialogContext) => [
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text("Yes, keep going"),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text("No"),
+        ),
+      ],
+    );
+    // "Yes, keep going" (or dismissing the dialog) means the streak stays.
+    if (gaveIn != true) return false;
+    if (!context.mounted) return false;
+
+    if (!hasProgress) {
+      // Nothing at stake — just acknowledge, don't ask for a reset
+      // confirmation and don't reset anything.
+      await _dialog(
+        context,
+        title: "Nothing to reset yet",
+        body: sureBody,
+        actions: (dialogContext) => [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text("Got it"),
+          ),
+        ],
+      );
+      return false;
+    }
+
+    final sure = await _dialog(
+      context,
+      title: "Are you sure?",
+      body: sureBody,
+      actions: (dialogContext) => [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text("Cancel"),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text("Reset"),
+        ),
+      ],
+    );
+    return sure ?? false;
+  }
+
+  static Future<bool?> _dialog(
+    BuildContext context, {
+    required String title,
+    required String body,
+    required List<Widget> Function(BuildContext) actions,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppColors.of(dialogContext).dialogBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(title, style: dialogTitleStyle(dialogContext)),
+        content: Text(body, style: dialogBodyStyle(dialogContext)),
+        actions: actions(dialogContext),
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -474,6 +970,51 @@ class _NopeHomeState extends State<NopeHome> {
       habits = [];
     }
     setState(() {});
+    _checkWelcomeBack(prefs, now);
+  }
+
+  // Shows a one-time "welcome back" dialog if it's been a couple of days
+  // since the app was last opened. Doesn't require any permissions and works
+  // identically on web and mobile, unlike push notifications.
+  Future<void> _checkWelcomeBack(SharedPreferences prefs, DateTime now) async {
+    final lastOpenedMillis = prefs.getInt('lastOpenedMillis');
+    await prefs.setInt('lastOpenedMillis', now.millisecondsSinceEpoch);
+    if (lastOpenedMillis == null) return; // first-ever launch, nothing to welcome back from
+    if (habits.isEmpty) return; // nothing at stake yet
+
+    final lastOpened = DateTime.fromMillisecondsSinceEpoch(lastOpenedMillis);
+    final daysAway = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(lastOpened.year, lastOpened.month, lastOpened.day))
+        .inDays;
+    if (daysAway < 2) return;
+
+    final brokenStreaks = habits.where((h) => h.lastTap != null && !h.tappedToday(now) && h.streak == 0).length;
+
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: AppColors.of(dialogContext).dialogBg,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text("Welcome back", style: dialogTitleStyle(dialogContext)),
+          content: Text(
+            brokenStreaks > 0
+                ? "It's been $daysAway days. $brokenStreaks streak${brokenStreaks == 1 ? '' : 's'} reset while you were away — ready for a fresh start?"
+                : "It's been $daysAway days since you checked in. Good to see you again.",
+            style: dialogBodyStyle(dialogContext),
+          ),
+          actions: [
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text("Let's go"),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   Future<void> _saveHabits() async {
@@ -500,7 +1041,22 @@ class _NopeHomeState extends State<NopeHome> {
     _saveHabits();
   }
 
-  void _resetHabit(Habit h) {
+  Future<void> _resetHabit(Habit h) async {
+    final confirmed = await ResetConfirmation.confirm(
+      context,
+      subtitle: h.streak > 0
+          ? 'You\'re ${h.streak} day${h.streak == 1 ? "" : "s"} into "${h.name}". '
+              'Resetting clears that streak.'
+          : 'You haven\'t started a streak with "${h.name}" yet.',
+      sureBody: h.streak > 0
+          ? 'You\'ve fought off "${h.name}" for ${h.streak} day${h.streak == 1 ? "" : "s"} '
+              'straight. That took real willpower — don\'t let one moment erase it. '
+              'Reset anyway?'
+          : 'There\'s no streak on "${h.name}" yet, so there\'s nothing to reset.',
+      hasProgress: h.streak > 0,
+    );
+    if (!confirmed) return;
+
     HapticFeedback.mediumImpact();
     // Habit.reset() calls notifyListeners() itself — only the AnimatedBuilder
     // wrapping this one card rebuilds, so no setState() here.
@@ -535,28 +1091,64 @@ class _NopeHomeState extends State<NopeHome> {
     _saveHabits();
   }
 
+  void _changeIcon(Habit h, IconData newIcon) {
+    h.setIcon(newIcon);
+    _saveHabits();
+  }
+
+  int _habitsAtRiskCount() {
+    final now = DateTime.now();
+    return habits.where((h) => !h.tappedToday(now)).length;
+  }
+
+  // Evening (>=6pm) + at least one habit not yet tapped today. Purely an
+  // in-app nudge -- no permissions needed, and it only helps if they've
+  // actually opened the app, which is what makes it a safe complement to
+  // the (mobile-only) push notification and the welcome-back dialog.
+  bool _showRiskBanner() {
+    if (habits.isEmpty) return false;
+    if (DateTime.now().hour < 18) return false;
+    return _habitsAtRiskCount() > 0;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFF080808),
+      backgroundColor: colors.bg,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF080808),
+        backgroundColor: colors.bg,
         elevation: 0,
         titleSpacing: 24,
-        title: const Text(
+        title: Text(
           "nope.",
           style: TextStyle(
             fontSize: 28,
             fontWeight: FontWeight.w900,
-            color: Colors.white,
+            color: colors.ink,
             letterSpacing: -1.5,
           ),
         ),
         actions: [
+          // Light/dark mode switch.
+          ValueListenableBuilder<ThemeMode>(
+            valueListenable: themeModeNotifier,
+            builder: (context, mode, _) => IconButton(
+              tooltip: mode == ThemeMode.dark ? "Switch to light mode" : "Switch to dark mode",
+              icon: Icon(
+                mode == ThemeMode.dark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                color: colors.ink.withValues(alpha: 0.54),
+              ),
+              onPressed: () {
+                HapticFeedback.selectionClick();
+                toggleThemeMode();
+              },
+            ),
+          ),
           if (habits.isNotEmpty)
             IconButton(
               tooltip: "Calendar view",
-              icon: const Icon(Icons.calendar_month_outlined, color: Colors.white54),
+              icon: Icon(Icons.calendar_month_outlined, color: colors.ink.withValues(alpha: 0.54)),
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => CalendarView(habits: habits)),
@@ -565,8 +1157,17 @@ class _NopeHomeState extends State<NopeHome> {
           if (habits.isNotEmpty)
             IconButton(
               tooltip: "Reset all streaks",
-              icon: const Icon(Icons.restart_alt, color: Colors.white54),
-              onPressed: () {
+              icon: Icon(Icons.restart_alt, color: colors.ink.withValues(alpha: 0.54)),
+              onPressed: () async {
+                final confirmed = await ResetConfirmation.confirm(
+                  context,
+                  subtitle: "This clears every habit's streak back to zero, not just one.",
+                  sureBody: "Every one of these streaks is a day you chose yourself over "
+                      "the urge. Resetting wipes all of that away at once. Are you sure?",
+                  hasProgress: habits.any((h) => h.streak > 0),
+                );
+                if (!confirmed) return;
+
                 HapticFeedback.mediumImpact();
                 for (final h in habits) {
                   h.reset(); // notifies only that habit's own card
@@ -579,8 +1180,8 @@ class _NopeHomeState extends State<NopeHome> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _addHabit,
-        backgroundColor: Colors.white,
-        foregroundColor: const Color(0xFF080808),
+        backgroundColor: kAccent,
+        foregroundColor: Colors.white,
         elevation: 0,
         label: const Text(
           "Add Habit",
@@ -593,7 +1194,12 @@ class _NopeHomeState extends State<NopeHome> {
           if (habits.isEmpty)
             const _EmptyState()
           else
-            ListView.builder(
+            Column(
+              children: [
+                if (_showRiskBanner())
+                  _RiskBanner(count: _habitsAtRiskCount()),
+                Expanded(
+                  child: ListView.builder(
               padding: const EdgeInsets.only(top: 8, bottom: 120, left: 16, right: 16),
               itemCount: habits.length,
               itemBuilder: (context, i) {
@@ -603,7 +1209,7 @@ class _NopeHomeState extends State<NopeHome> {
                   background: Container(
                     margin: const EdgeInsets.symmetric(vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.redAccent.withOpacity(0.15),
+                      color: Colors.redAccent.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     alignment: Alignment.centerLeft,
@@ -614,16 +1220,19 @@ class _NopeHomeState extends State<NopeHome> {
                   confirmDismiss: (_) async {
                     return await showDialog<bool>(
                       context: context,
-                      builder: (_) => AlertDialog(
-                        backgroundColor: const Color(0xFF141414),
+                      builder: (dialogContext) => AlertDialog(
+                        backgroundColor: AppColors.of(dialogContext).dialogBg,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        title: const Text("Delete habit?"),
-                        content: Text('Remove "${h.name}" and its history?'),
+                        title: Text("Delete habit?", style: dialogTitleStyle(dialogContext)),
+                        content: Text(
+                          'Remove "${h.name}" and its history?',
+                          style: dialogBodyStyle(dialogContext),
+                        ),
                         actions: [
-                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+                          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text("Cancel")),
                           ElevatedButton(
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                            onPressed: () => Navigator.pop(context, true),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+                            onPressed: () => Navigator.pop(dialogContext, true),
                             child: const Text("Delete"),
                           ),
                         ],
@@ -637,9 +1246,13 @@ class _NopeHomeState extends State<NopeHome> {
                     onNope: () => _pressNope(h),
                     onReset: () => _resetHabit(h),
                     onColorChanged: (c) => _changeColor(h, c),
+                    onIconChanged: (i) => _changeIcon(h, i),
                   ),
                 );
               },
+                  ),
+                ),
+              ],
             ),
           Positioned.fill(
             child: IgnorePointer(
@@ -655,13 +1268,54 @@ class _NopeHomeState extends State<NopeHome> {
                   numberOfParticles: 18,
                   gravity: 0.35,
                   colors: [
-                    Colors.white,
-                    const Color(0xFF4A9EFF),
-                    const Color(0xFFFF4A6B),
-                    const Color(0xFF4AFF9E),
-                    const Color(0xFFFFD700),
+                    colors.ink,
+                    kAccent,
+                    const Color(0xFFD7546C),
+                    const Color(0xFF547B66),
+                    const Color(0xFFB6A02B),
                   ],
                 ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENING RISK BANNER -- shown above the habit list when it's getting late
+// and at least one habit hasn't been tapped yet today.
+// ─────────────────────────────────────────────────────────────────────────────
+class _RiskBanner extends StatelessWidget {
+  final int count;
+  const _RiskBanner({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: kAccent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kAccent.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.nightlight_round, size: 18, color: kAccent),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              count == 1
+                  ? "1 habit still needs a NOPE today."
+                  : "$count habits still need a NOPE today.",
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: colors.ink.withValues(alpha: 0.85),
               ),
             ),
           ),
@@ -681,13 +1335,23 @@ class _AddHabitSheet extends StatefulWidget {
 
 class _AddHabitSheetState extends State<_AddHabitSheet> {
   final nameCtrl = TextEditingController();
+  final streakCtrl = TextEditingController(text: "0");
   Color selectedColor = presetColors["Blue"]!;
+  IconData selectedIcon = presetIcons.first;
   int streak = 0;
 
   @override
   void dispose() {
     nameCtrl.dispose();
+    streakCtrl.dispose();
     super.dispose();
+  }
+
+  void _setStreak(int value) {
+    final clamped = value < 0 ? 0 : value;
+    setState(() => streak = clamped);
+    streakCtrl.text = clamped.toString();
+    streakCtrl.selection = TextSelection.collapsed(offset: streakCtrl.text.length);
   }
 
   void _submit() {
@@ -702,17 +1366,19 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
         streak: streak,
         longestStreak: streak,
         colorValue: selectedColor.value,
+        iconCodePoint: selectedIcon.codePoint,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF111111),
+        color: colors.card,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-        border: Border.all(color: Colors.white.withOpacity(0.06)),
+        border: Border.all(color: colors.ink.withValues(alpha: 0.06)),
       ),
       padding: EdgeInsets.fromLTRB(
         22, 14, 22, MediaQuery.of(context).viewInsets.bottom + 28,
@@ -729,7 +1395,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                 width: 36,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.white12,
+                  color: colors.ink.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -744,30 +1410,18 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
-                  selectedColor.withOpacity(0.18),
-                  selectedColor.withOpacity(0.04),
+                  selectedColor.withValues(alpha: 0.18),
+                  selectedColor.withValues(alpha: 0.04),
                 ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: selectedColor.withOpacity(0.25)),
+              border: Border.all(color: selectedColor.withValues(alpha: 0.25)),
             ),
             child: Row(
               children: [
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: selectedColor,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(color: selectedColor.withOpacity(0.45), blurRadius: 16, spreadRadius: 1),
-                    ],
-                  ),
-                  child: const Icon(Icons.bolt_rounded, color: Colors.white, size: 24),
-                ),
+                Icon(selectedIcon, color: selectedColor, size: 44),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(
@@ -785,7 +1439,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       const SizedBox(height: 2),
                       Text(
                         "Starting streak: $streak day${streak == 1 ? '' : 's'}",
-                        style: const TextStyle(fontSize: 12.5, color: Colors.white54, fontWeight: FontWeight.w500),
+                        style: TextStyle(fontSize: 12.5, color: colors.ink.withValues(alpha: 0.54), fontWeight: FontWeight.w500),
                       ),
                     ],
                   ),
@@ -795,9 +1449,9 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           ),
 
           const SizedBox(height: 24),
-          const Text(
+          Text(
             "NAME",
-            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
           const SizedBox(height: 8),
           _StyledTextField(
@@ -808,91 +1462,152 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           ),
 
           const SizedBox(height: 22),
-          const Text(
+          Text(
             "STARTING STREAK",
-            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.05),
+              color: colors.ink.withValues(alpha: 0.05),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.white12),
+              border: Border.all(color: colors.ink.withValues(alpha: 0.12)),
             ),
             child: Row(
               children: [
                 _StepperButton(
                   icon: Icons.remove_rounded,
-                  onTap: streak > 0 ? () => setState(() => streak--) : null,
+                  onTap: streak > 0 ? () => _setStreak(streak - 1) : null,
                 ),
                 Expanded(
                   child: Center(
-                    child: Text(
-                      "$streak",
+                    child: TextField(
+                      controller: streakCtrl,
+                      textAlign: TextAlign.center,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        isDense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      onChanged: (val) => setState(() => streak = int.tryParse(val) ?? 0),
                     ),
                   ),
                 ),
                 _StepperButton(
                   icon: Icons.add_rounded,
-                  onTap: () => setState(() => streak++),
+                  onTap: () => _setStreak(streak + 1),
                 ),
               ],
             ),
           ),
 
           const SizedBox(height: 22),
-          const Text(
+          Text(
             "COLOR",
-            style: TextStyle(fontSize: 11.5, color: Colors.white38, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
           const SizedBox(height: 10),
           Row(
-            children: presetColors.entries.map((entry) {
-              final isSelected = entry.value == selectedColor;
-              return Expanded(
-                child: GestureDetector(
-                  onTap: () {
-                    HapticFeedback.selectionClick();
-                    setState(() => selectedColor = entry.value);
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOut,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: entry.value.withOpacity(isSelected ? 0.22 : 0.08),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: isSelected ? entry.value : Colors.transparent,
-                          width: 2,
+            children: [
+              ...presetColors.entries.map((entry) {
+                final isSelected = entry.value == selectedColor;
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      setState(() => selectedColor = entry.value);
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOut,
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: entry.value.withValues(alpha: isSelected ? 0.22 : 0.08),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: isSelected ? entry.value : Colors.transparent,
+                            width: 2,
+                          ),
                         ),
-                      ),
-                      child: Center(
-                        child: AnimatedScale(
-                          duration: const Duration(milliseconds: 200),
-                          scale: isSelected ? 1.0 : 0.85,
-                          child: Container(
-                            width: 18,
-                            height: 18,
-                            decoration: BoxDecoration(
-                              color: entry.value,
-                              shape: BoxShape.circle,
-                              boxShadow: isSelected
-                                  ? [BoxShadow(color: entry.value.withOpacity(0.6), blurRadius: 8)]
-                                  : [],
+                        child: Center(
+                          child: AnimatedScale(
+                            duration: const Duration(milliseconds: 200),
+                            scale: isSelected ? 1.0 : 0.85,
+                            child: Container(
+                              width: 18,
+                              height: 18,
+                              decoration: BoxDecoration(
+                                color: entry.value,
+                                shape: BoxShape.circle,
+                                boxShadow: isSelected
+                                    ? [BoxShadow(color: entry.value.withValues(alpha: 0.6), blurRadius: 8)]
+                                    : [],
+                              ),
+                              child: isSelected
+                                  ? const Icon(Icons.check, color: Colors.white, size: 12)
+                                  : null,
                             ),
-                            child: isSelected
-                                ? const Icon(Icons.check, color: Colors.white, size: 12)
-                                : null,
                           ),
                         ),
                       ),
                     ),
                   ),
+                );
+              }),
+              _customColorCardSwatch(
+                current: selectedColor,
+                isCustom: !_isPresetColor(selectedColor),
+                ink: colors.ink,
+                onTap: () async {
+                  final picked = await _pickCustomColor(context, selectedColor);
+                  if (picked != null) {
+                    HapticFeedback.selectionClick();
+                    setState(() => selectedColor = picked);
+                  }
+                },
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 22),
+          Text(
+            "ICON",
+            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: presetIcons.map((icon) {
+              final isSelected = icon.codePoint == selectedIcon.codePoint;
+              return GestureDetector(
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  setState(() => selectedIcon = icon);
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: isSelected ? selectedColor : colors.ink.withValues(alpha: 0.06),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: isSelected ? Colors.white : Colors.transparent,
+                      width: 2,
+                    ),
+                    boxShadow: isSelected
+                        ? [BoxShadow(color: selectedColor.withValues(alpha: 0.45), blurRadius: 10)]
+                        : [],
+                  ),
+                  child: Icon(icon, size: 20, color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.54)),
                 ),
               );
             }).toList(),
@@ -907,13 +1622,13 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 17),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.06),
+                      color: colors.ink.withValues(alpha: 0.06),
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    child: const Center(
+                    child: Center(
                       child: Text(
                         "Cancel",
-                        style: TextStyle(color: Colors.white60, fontSize: 15, fontWeight: FontWeight.w700),
+                        style: TextStyle(color: colors.ink.withValues(alpha: 0.6), fontSize: 15, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ),
@@ -928,13 +1643,13 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                     padding: const EdgeInsets.symmetric(vertical: 17),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        colors: [selectedColor, selectedColor.withOpacity(0.7)],
+                        colors: [selectedColor, selectedColor.withValues(alpha: 0.7)],
                         begin: Alignment.centerLeft,
                         end: Alignment.centerRight,
                       ),
                       borderRadius: BorderRadius.circular(16),
                       boxShadow: [
-                        BoxShadow(color: selectedColor.withOpacity(0.35), blurRadius: 16, offset: const Offset(0, 6)),
+                        BoxShadow(color: selectedColor.withValues(alpha: 0.35), blurRadius: 16, offset: const Offset(0, 6)),
                       ],
                     ),
                     child: const Center(
@@ -962,22 +1677,22 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
 class _StepperButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback? onTap;
-
   const _StepperButton({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final enabled = onTap != null;
+    final colors = AppColors.of(context);
     return GestureDetector(
       onTap: onTap,
       child: Container(
         width: 44,
         height: 44,
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(enabled ? 0.08 : 0.02),
+          color: colors.ink.withValues(alpha: enabled ? 0.08 : 0.02),
           borderRadius: BorderRadius.circular(10),
         ),
-        child: Icon(icon, size: 18, color: enabled ? Colors.white : Colors.white24),
+        child: Icon(icon, size: 18, color: enabled ? colors.ink : colors.ink.withValues(alpha: 0.24)),
       ),
     );
   }
@@ -1002,28 +1717,29 @@ class _StyledTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
       onChanged: onChanged == null ? null : (_) => onChanged!(),
-      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+      style: TextStyle(color: colors.ink, fontSize: 16, fontWeight: FontWeight.w600),
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
-        prefixIcon: icon == null ? null : Icon(icon, size: 19, color: Colors.white38),
-        labelStyle: const TextStyle(color: Colors.white38),
-        hintStyle: const TextStyle(color: Colors.white24, fontWeight: FontWeight.w500),
+        prefixIcon: icon == null ? null : Icon(icon, size: 19, color: colors.ink.withValues(alpha: 0.38)),
+        labelStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38)),
+        hintStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontWeight: FontWeight.w500),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Colors.white12),
+          borderSide: BorderSide(color: colors.ink.withValues(alpha: 0.12)),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Colors.white38),
+          borderSide: const BorderSide(color: kAccent),
         ),
         contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
         filled: true,
-        fillColor: Colors.white.withOpacity(0.05),
+        fillColor: colors.ink.withValues(alpha: 0.05),
       ),
     );
   }
@@ -1039,6 +1755,7 @@ class _HabitCard extends StatelessWidget {
   final VoidCallback onReset;
   final ValueChanged<String>? onToneChanged;
   final ValueChanged<Color> onColorChanged;
+  final ValueChanged<IconData> onIconChanged;
 
   const _HabitCard({
     required this.habit,
@@ -1046,6 +1763,7 @@ class _HabitCard extends StatelessWidget {
     required this.onNope,
     required this.onReset,
     required this.onColorChanged,
+    required this.onIconChanged,
     this.onToneChanged,
   });
 
@@ -1064,6 +1782,7 @@ class _HabitCard extends StatelessWidget {
   }
 
   Widget _buildCard(BuildContext context) {
+    final colors = AppColors.of(context);
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
     final lastUrges = habit.urgeLog.reversed.take(3).toList();
@@ -1071,40 +1790,51 @@ class _HabitCard extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF111111),
-        borderRadius: BorderRadius.circular(20),
-        border: Border(
-          left: BorderSide(color: habitColor, width: 3),
+        gradient: LinearGradient(
+          colors: [
+            habitColor.withValues(alpha: 0.18),
+            habitColor.withValues(alpha: 0.04),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
         ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: habitColor.withValues(alpha: 0.25)),
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header row
+            // Header row -- icon + name centered as a block; reset button
+            // pinned to the right, balanced by an equal-width spacer on the
+            // left so the centered block is actually centered, not just
+            // centered-minus-button-width.
             Row(
               children: [
-                // Color dot (tap to change)
-                GestureDetector(
-                  onTap: () => _showColorPicker(context),
-                  child: Container(
-                    width: 12,
-                    height: 12,
-                    margin: const EdgeInsets.only(right: 10, top: 2),
-                    decoration: BoxDecoration(
-                      color: habitColor,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
+                const SizedBox(width: 36),
                 Expanded(
-                  child: Text(
-                    habit.name,
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.5,
+                  child: GestureDetector(
+                    onTap: () => _showCustomizeSheet(context),
+                    child: Column(
+                      children: [
+                        Icon(
+                          habitIconForCodePoint(habit.iconCodePoint),
+                          size: 84,
+                          color: habitColor,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          habit.name,
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -1113,7 +1843,7 @@ class _HabitCard extends StatelessWidget {
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                   onPressed: onReset,
-                  icon: const Icon(Icons.refresh, size: 20, color: Colors.white38),
+                  icon: Icon(Icons.refresh, size: 20, color: colors.ink.withValues(alpha: 0.38)),
                 ),
               ],
             ),
@@ -1133,14 +1863,14 @@ class _HabitCard extends StatelessWidget {
                 _StatChip(
                   label: "best",
                   value: "${habit.longestStreak}d",
-                  color: Colors.white24,
+                  color: colors.ink.withValues(alpha: 0.24),
                 ),
                 if (habit.lastTap != null) ...[
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       "last: ${_formatDate(habit.lastTap!)}",
-                      style: const TextStyle(fontSize: 11, color: Colors.white30),
+                      style: TextStyle(fontSize: 11, color: colors.ink.withValues(alpha: 0.3)),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -1149,7 +1879,6 @@ class _HabitCard extends StatelessWidget {
             ),
 
             const SizedBox(height: 18),
-
             // NOPE Button
             Center(
               child: _NopeButton(
@@ -1168,7 +1897,7 @@ class _HabitCard extends StatelessWidget {
                   habit.lastLine!,
                   key: ValueKey(habit.lastLine),
                   style: TextStyle(
-                    color: tappedToday ? habitColor.withOpacity(0.8) : Colors.white54,
+                    color: tappedToday ? habitColor.withValues(alpha: 0.8) : colors.ink.withValues(alpha: 0.54),
                     fontSize: 14,
                     fontStyle: FontStyle.italic,
                   ),
@@ -1186,12 +1915,12 @@ class _HabitCard extends StatelessWidget {
                     .map((iso) => Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.05),
+                            color: colors.ink.withValues(alpha: 0.05),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
                             iso.replaceFirst('T', ' ').split('.').first,
-                            style: const TextStyle(fontSize: 11, color: Colors.white30),
+                            style: TextStyle(fontSize: 11, color: colors.ink.withValues(alpha: 0.3)),
                           ),
                         ))
                     .toList(),
@@ -1203,38 +1932,104 @@ class _HabitCard extends StatelessWidget {
     );
   }
 
-  void _showColorPicker(BuildContext context) async {
-    final Color currentColor = Color(habit.colorValue);
-    final result = await showDialog<Color>(
+  void _showCustomizeSheet(BuildContext context) async {
+    Color tempColor = Color(habit.colorValue);
+    IconData tempIcon = habitIconForCodePoint(habit.iconCodePoint);
+
+    final result = await showDialog<(Color, IconData)>(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF141414),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text("Pick a color"),
-        content: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: presetColors.entries.map((entry) {
-            return GestureDetector(
-              onTap: () => Navigator.pop(context, entry.value),
-              child: Container(
-                width: 42,
-                height: 42,
-                margin: const EdgeInsets.symmetric(horizontal: 5),
-                decoration: BoxDecoration(
-                  color: entry.value,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: entry.value == currentColor ? Colors.white : Colors.transparent,
-                    width: 3,
-                  ),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final colors = AppColors.of(context);
+          return AlertDialog(
+          backgroundColor: colors.dialogBg,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text("Customize habit", style: dialogTitleStyle(context)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    ...presetColors.entries.map((entry) {
+                      final isSelected = entry.value == tempColor;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => tempColor = entry.value),
+                        child: Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: entry.value,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected ? Colors.white : Colors.transparent,
+                              width: 3,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                    _customColorCircleSwatch(
+                      current: tempColor,
+                      isCustom: !_isPresetColor(tempColor),
+                      onTap: () async {
+                        final picked = await _pickCustomColor(context, tempColor);
+                        if (picked != null) setDialogState(() => tempColor = picked);
+                      },
+                    ),
+                  ],
                 ),
-              ),
-            );
-          }).toList(),
-        ),
+                const SizedBox(height: 20),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: presetIcons.map((icon) {
+                    final isSelected = icon.codePoint == tempIcon.codePoint;
+                    return GestureDetector(
+                      onTap: () => setDialogState(() => tempIcon = icon),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: isSelected ? tempColor : colors.ink.withValues(alpha: 0.06),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: isSelected ? Colors.white : Colors.transparent,
+                            width: 2,
+                          ),
+                        ),
+                        child: Icon(icon, size: 18, color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.7)),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: tempColor, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(context, (tempColor, tempIcon)),
+              child: const Text("Done"),
+            ),
+          ],
+          );
+        },
       ),
     );
-    if (result != null) onColorChanged(result);
+
+    if (result != null) {
+      onColorChanged(result.$1);
+      onIconChanged(result.$2);
+    }
   }
 
   String _formatDate(DateTime dt) {
@@ -1261,10 +2056,11 @@ class _StatChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: highlight ? color.withOpacity(0.12) : Colors.white.withOpacity(0.05),
+        color: highlight ? color.withValues(alpha: 0.12) : colors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
@@ -1275,7 +2071,7 @@ class _StatChip extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w800,
-              color: highlight ? color : Colors.white54,
+              color: highlight ? color : colors.ink.withValues(alpha: 0.54),
               letterSpacing: -0.5,
             ),
           ),
@@ -1284,7 +2080,7 @@ class _StatChip extends StatelessWidget {
             label,
             style: TextStyle(
               fontSize: 11,
-              color: highlight ? color.withOpacity(0.7) : Colors.white30,
+              color: highlight ? color.withValues(alpha: 0.7) : colors.ink.withValues(alpha: 0.3),
             ),
           ),
         ],
@@ -1316,10 +2112,11 @@ class _NopeButtonState extends State<_NopeButton> {
 
   @override
   Widget build(BuildContext context) {
-    final color = widget.tappedToday ? widget.color : Colors.white;
+    final colors = AppColors.of(context);
+    final color = widget.tappedToday ? widget.color : colors.ink;
     final bg = widget.tappedToday
-        ? widget.color.withOpacity(0.12)
-        : const Color(0xFF1A1A1A);
+        ? widget.color.withValues(alpha: 0.12)
+        : colors.raised;
 
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
@@ -1340,11 +2137,11 @@ class _NopeButtonState extends State<_NopeButton> {
             shape: BoxShape.circle,
             color: bg,
             border: Border.all(
-              color: widget.tappedToday ? widget.color : Colors.white12,
+              color: widget.tappedToday ? widget.color : colors.ink.withValues(alpha: 0.12),
               width: widget.tappedToday ? 2 : 1,
             ),
             boxShadow: widget.tappedToday
-                ? [BoxShadow(color: widget.color.withOpacity(0.25), blurRadius: 20, spreadRadius: 4)]
+                ? [BoxShadow(color: widget.color.withValues(alpha: 0.25), blurRadius: 20, spreadRadius: 4)]
                 : [],
           ),
           child: Center(
@@ -1371,7 +2168,6 @@ class _NopeButtonState extends State<_NopeButton> {
 class _PressableButton extends StatefulWidget {
   final VoidCallback onTap;
   final Widget child;
-
   const _PressableButton({required this.onTap, required this.child});
 
   @override
@@ -1436,17 +2232,19 @@ class _CalendarViewState extends State<CalendarView> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFF080808),
+      backgroundColor: colors.bg,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF080808),
+        backgroundColor: colors.bg,
         elevation: 0,
         title: const Text(
           "Calendar",
           style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -0.5),
         ),
       ),
-      body: Column(
+      body: SingleChildScrollView(
+        child: Column(
         children: [
           TableCalendar(
             firstDay: DateTime.utc(2023, 1, 1),
@@ -1460,35 +2258,35 @@ class _CalendarViewState extends State<CalendarView> {
                 _focusedDay = focused;
               });
             },
-            calendarStyle: const CalendarStyle(
-              defaultTextStyle: TextStyle(color: Colors.white70),
-              weekendTextStyle: TextStyle(color: Colors.white54),
-              outsideTextStyle: TextStyle(color: Colors.white24),
+            calendarStyle: CalendarStyle(
+              defaultTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.7)),
+              weekendTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.54)),
+              outsideTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24)),
               todayDecoration: BoxDecoration(
-                color: Colors.white24,
+                color: kAccent.withValues(alpha: 0.35),
                 shape: BoxShape.circle,
               ),
-              selectedDecoration: BoxDecoration(
-                color: Colors.white,
+              selectedDecoration: const BoxDecoration(
+                color: kAccent,
                 shape: BoxShape.circle,
               ),
-              selectedTextStyle: TextStyle(color: Color(0xFF080808), fontWeight: FontWeight.w800),
-              todayTextStyle: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              selectedTextStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+              todayTextStyle: TextStyle(color: colors.ink, fontWeight: FontWeight.w600),
             ),
-            headerStyle: const HeaderStyle(
+            headerStyle: HeaderStyle(
               formatButtonVisible: false,
               titleCentered: true,
-              titleTextStyle: TextStyle(
+              titleTextStyle: const TextStyle(
                 fontWeight: FontWeight.w800,
                 fontSize: 16,
                 letterSpacing: -0.5,
               ),
-              leftChevronIcon: Icon(Icons.chevron_left, color: Colors.white54),
-              rightChevronIcon: Icon(Icons.chevron_right, color: Colors.white54),
+              leftChevronIcon: Icon(Icons.chevron_left, color: colors.ink.withValues(alpha: 0.54)),
+              rightChevronIcon: Icon(Icons.chevron_right, color: colors.ink.withValues(alpha: 0.54)),
             ),
-            daysOfWeekStyle: const DaysOfWeekStyle(
-              weekdayStyle: TextStyle(color: Colors.white38, fontSize: 12),
-              weekendStyle: TextStyle(color: Colors.white24, fontSize: 12),
+            daysOfWeekStyle: DaysOfWeekStyle(
+              weekdayStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38), fontSize: 12),
+              weekendStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontSize: 12),
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, _) {
@@ -1521,6 +2319,7 @@ class _CalendarViewState extends State<CalendarView> {
                 children: [
                   Builder(builder: (context) {
                     final onDay = habitsOnDay(_selectedDay!);
+                    final colors = AppColors.of(context);
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1546,12 +2345,18 @@ class _CalendarViewState extends State<CalendarView> {
                                   color: Color(h.colorValue),
                                 ),
                               ),
-                              Text(h.name, style: const TextStyle(color: Colors.white70)),
+                              Expanded(
+                                child: Text(
+                                  h.name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(color: colors.ink.withValues(alpha: 0.7)),
+                                ),
+                              ),
                             ],
                           ),
                         )),
                         if (onDay.isEmpty)
-                          const Text("Nothing logged.", style: TextStyle(color: Colors.white38)),
+                          Text("Nothing logged.", style: TextStyle(color: colors.ink.withValues(alpha: 0.38))),
                       ],
                     );
                   }),
@@ -1559,6 +2364,7 @@ class _CalendarViewState extends State<CalendarView> {
               ),
             ),
         ],
+        ),
       ),
     );
   }
@@ -1572,37 +2378,38 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 32),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text(
+            Text(
               "nope.",
               style: TextStyle(
                 fontSize: 56,
                 fontWeight: FontWeight.w900,
-                color: Colors.white12,
+                color: colors.ink.withValues(alpha: 0.12),
                 letterSpacing: -3,
               ),
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               "No habits yet.",
               style: TextStyle(
                 fontSize: 20,
-                color: Colors.white38,
+                color: colors.ink.withValues(alpha: 0.38),
                 fontWeight: FontWeight.w600,
                 letterSpacing: -0.5,
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               "Add a habit and hit NOPE\nonce a day to grow your streak.",
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: Colors.white24,
+                color: colors.ink.withValues(alpha: 0.24),
                 fontSize: 15,
                 height: 1.5,
               ),
