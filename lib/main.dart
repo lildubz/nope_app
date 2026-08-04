@@ -69,18 +69,21 @@ class AppColors {
     required this.ink,
   });
 
+  // card/dialogBg are deliberately not fully opaque (0xE6 ~= 90%) so cards
+  // and popups read as slightly translucent against the scaffold instead of
+  // flat opaque panels.
   static const dark = AppColors(
     bg: Color(0xFF080808),
-    card: Color(0xFF111111),
-    dialogBg: Color(0xFF141414),
+    card: Color(0xE6111111),
+    dialogBg: Color(0xCC141414),
     raised: Color(0xFF1A1A1A),
     ink: Colors.white,
   );
 
   static const light = AppColors(
     bg: Color(0xFFF6F6F8),
-    card: Colors.white,
-    dialogBg: Colors.white,
+    card: Color(0xE6FFFFFF),
+    dialogBg: Color(0xCCE8E8EA),
     raised: Color(0xFFEFEFF2),
     ink: Color(0xFF0B0B0C),
   );
@@ -825,14 +828,14 @@ class ResetConfirmation {
       title: "Have you resisted until this point?",
       body: subtitle,
       actions: (dialogContext) => [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text("No"),
+        ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
           onPressed: () => Navigator.pop(dialogContext, false),
           child: const Text("Yes, keep going"),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text("No"),
         ),
       ],
     );
@@ -885,6 +888,10 @@ class ResetConfirmation {
   }) {
     return showDialog<bool>(
       context: context,
+      // Default barrier is 54% black; combined with the dialog's own
+      // translucent background that reads as the whole screen going dark.
+      // A lighter barrier keeps the dim-behind-the-dialog effect subtle.
+      barrierColor: Colors.black.withValues(alpha: 0.3),
       builder: (dialogContext) => AlertDialog(
         backgroundColor: AppColors.of(dialogContext).dialogBg,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -906,7 +913,7 @@ class NopeHome extends StatefulWidget {
   State<NopeHome> createState() => _NopeHomeState();
 }
 
-class _NopeHomeState extends State<NopeHome> {
+class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
   final Map<String, List<String>> tonePacks = {
     'Light': [
       "Way to go! Your future self thanks you.",
@@ -943,6 +950,24 @@ class _NopeHomeState extends State<NopeHome> {
   List<Habit> habits = [];
   late ConfettiController _confettiController;
 
+  // Reset "damage" effect: the body shakes and a red vignette flashes over
+  // it, instead of the celebratory confetti burst used for a NOPE tap.
+  // _shakeMagnitude scales how hard each plays -- resetting one habit is a
+  // small jolt, resetting all of them hits harder.
+  late final AnimationController _shakeController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 420),
+  );
+  late final AnimationController _flashController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 550),
+  );
+  late final Animation<double> _flashAnimation = CurvedAnimation(
+    parent: _flashController,
+    curve: Curves.easeOut,
+  );
+  double _shakeMagnitude = 1.0;
+
   @override
   void initState() {
     super.initState();
@@ -953,7 +978,18 @@ class _NopeHomeState extends State<NopeHome> {
   @override
   void dispose() {
     _confettiController.dispose();
+    _shakeController.dispose();
+    _flashController.dispose();
     super.dispose();
+  }
+
+  // Plays the shake + red-flash combo. [magnitude] scales the shake's
+  // amplitude and the flash's peak opacity -- 1.0 for a single reset, higher
+  // for resetting every habit at once.
+  void _playResetImpact({double magnitude = 1.0}) {
+    _shakeMagnitude = magnitude;
+    _shakeController.forward(from: 0);
+    _flashController.forward(from: 0).then((_) => _flashController.reverse());
   }
 
   Future<void> _loadHabits() async {
@@ -1045,7 +1081,7 @@ class _NopeHomeState extends State<NopeHome> {
     final confirmed = await ResetConfirmation.confirm(
       context,
       subtitle: h.streak > 0
-          ? 'You\'re ${h.streak} day${h.streak == 1 ? "" : "s"} into "${h.name}". '
+          ? 'You\'re ${h.streak} day${h.streak == 1 ? "" : "s"} into resisting "${h.name}". '
               'Resetting clears that streak.'
           : 'You haven\'t started a streak with "${h.name}" yet.',
       sureBody: h.streak > 0
@@ -1061,6 +1097,7 @@ class _NopeHomeState extends State<NopeHome> {
     // Habit.reset() calls notifyListeners() itself — only the AnimatedBuilder
     // wrapping this one card rebuilds, so no setState() here.
     h.reset();
+    _playResetImpact();
     _saveHabits();
   }
 
@@ -1168,39 +1205,44 @@ class _NopeHomeState extends State<NopeHome> {
                 );
                 if (!confirmed) return;
 
-                HapticFeedback.mediumImpact();
+                HapticFeedback.heavyImpact();
                 for (final h in habits) {
                   h.reset(); // notifies only that habit's own card
                 }
+                _playResetImpact(magnitude: 1.8);
                 _saveHabits();
               },
             ),
+          IconButton(
+            tooltip: "Add habit",
+            icon: Icon(Icons.add_rounded, color: colors.ink),
+            onPressed: _addHabit,
+          ),
           const SizedBox(width: 8),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addHabit,
-        backgroundColor: kAccent,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        label: const Text(
-          "Add Habit",
-          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -0.3),
-        ),
-        icon: const Icon(Icons.add, size: 20),
-      ),
       body: Stack(
         children: [
-          if (habits.isEmpty)
-            const _EmptyState()
-          else
-            Column(
+          // Wrapping just the list/empty-state content (not the AppBar) in
+          // a decaying horizontal wiggle -- driven by _shakeController and
+          // scaled by _shakeMagnitude -- for the reset "damage" effect.
+          AnimatedBuilder(
+            animation: _shakeController,
+            builder: (context, child) {
+              final t = _shakeController.value;
+              final decay = 1 - t;
+              final wiggle = math.sin(t * 14) * 10 * decay * _shakeMagnitude;
+              return Transform.translate(offset: Offset(wiggle, 0), child: child);
+            },
+            child: habits.isEmpty
+                ? const _EmptyState()
+                : Column(
               children: [
                 if (_showRiskBanner())
                   _RiskBanner(count: _habitsAtRiskCount()),
                 Expanded(
                   child: ListView.builder(
-              padding: const EdgeInsets.only(top: 8, bottom: 120, left: 16, right: 16),
+              padding: const EdgeInsets.only(top: 8, bottom: 24, left: 16, right: 16),
               itemCount: habits.length,
               itemBuilder: (context, i) {
                 final h = habits[i];
@@ -1254,6 +1296,7 @@ class _NopeHomeState extends State<NopeHome> {
                 ),
               ],
             ),
+          ),
           Positioned.fill(
             child: IgnorePointer(
               child: Align(
@@ -1275,6 +1318,33 @@ class _NopeHomeState extends State<NopeHome> {
                     const Color(0xFFB6A02B),
                   ],
                 ),
+              ),
+            ),
+          ),
+          // Red "damage" vignette that flashes in and fades out on reset --
+          // scales with _shakeMagnitude so resetting everything hits harder
+          // than resetting one habit.
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                animation: _flashAnimation,
+                builder: (context, _) {
+                  final peak = (0.35 * _shakeMagnitude).clamp(0.0, 0.75);
+                  final opacity = _flashAnimation.value * peak;
+                  if (opacity <= 0) return const SizedBox.shrink();
+                  return DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: RadialGradient(
+                        radius: 1.1,
+                        colors: [
+                          Colors.red.withValues(alpha: 0),
+                          Colors.red.withValues(alpha: opacity),
+                        ],
+                        stops: const [0.55, 1.0],
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -1456,7 +1526,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           const SizedBox(height: 8),
           _StyledTextField(
             controller: nameCtrl,
-            hint: "e.g. Less social media, No junk food, etc.",
+            hint: "e.g. smoking, junk food, social media, etc.",
             icon: Icons.edit_rounded,
             onChanged: () => setState(() {}),
           ),
@@ -1748,7 +1818,7 @@ class _StyledTextField extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // HABIT CARD
 // ─────────────────────────────────────────────────────────────────────────────
-class _HabitCard extends StatelessWidget {
+class _HabitCard extends StatefulWidget {
   final Habit habit;
   final List<String> toneOptions;
   final VoidCallback onNope;
@@ -1768,6 +1838,24 @@ class _HabitCard extends StatelessWidget {
   });
 
   @override
+  State<_HabitCard> createState() => _HabitCardState();
+}
+
+class _HabitCardState extends State<_HabitCard> {
+  // Tracks the streak value from the previous rebuild so a reset (streak
+  // suddenly dropping) can be told apart from a normal +1 NOPE tap -- only
+  // the former gets the quick scroll-down-to-0 animation.
+  int? _lastKnownStreak;
+
+  Habit get habit => widget.habit;
+  VoidCallback get onNope => widget.onNope;
+  VoidCallback get onReset => widget.onReset;
+  List<String> get toneOptions => widget.toneOptions;
+  ValueChanged<String>? get onToneChanged => widget.onToneChanged;
+  ValueChanged<Color> get onColorChanged => widget.onColorChanged;
+  ValueChanged<IconData> get onIconChanged => widget.onIconChanged;
+
+  @override
   Widget build(BuildContext context) {
     // RepaintBoundary keeps this card's paints isolated from its siblings.
     // AnimatedBuilder subscribes directly to `habit` (a ChangeNotifier), so
@@ -1785,21 +1873,29 @@ class _HabitCard extends StatelessWidget {
     final colors = AppColors.of(context);
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
-    final lastUrges = habit.urgeLog.reversed.take(3).toList();
+
+    final currentStreak = habit.streak;
+    final previousStreak = _lastKnownStreak ?? currentStreak;
+    final justReset = currentStreak < previousStreak;
+    _lastKnownStreak = currentStreak;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
+        // Translucent card panel (same treatment as every other card/popup
+        // in the app) with the habit's own color tinted on top -- without
+        // this base fill the card was just a faint color wash with nothing
+        // solid behind it, so the transparency change was invisible here.
+        color: colors.card,
         gradient: LinearGradient(
           colors: [
-            habitColor.withValues(alpha: 0.18),
-            habitColor.withValues(alpha: 0.04),
+            habitColor.withValues(alpha: 0.24),
+            habitColor.withValues(alpha: 0.06),
           ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: habitColor.withValues(alpha: 0.25)),
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
@@ -1853,12 +1949,24 @@ class _HabitCard extends StatelessWidget {
             // Streak info
             Row(
               children: [
-                _StatChip(
-                  label: "streak",
-                  value: "${habit.streak}d",
-                  color: habitColor,
-                  highlight: true,
-                ),
+                justReset
+                    ? TweenAnimationBuilder<int>(
+                        tween: IntTween(begin: previousStreak, end: currentStreak),
+                        duration: const Duration(milliseconds: 1100),
+                        curve: Curves.easeOut,
+                        builder: (context, value, _) => _StatChip(
+                          label: "streak",
+                          value: "${value}d",
+                          color: habitColor,
+                          highlight: true,
+                        ),
+                      )
+                    : _StatChip(
+                        label: "streak",
+                        value: "${currentStreak}d",
+                        color: habitColor,
+                        highlight: true,
+                      ),
                 const SizedBox(width: 8),
                 _StatChip(
                   label: "best",
@@ -1902,28 +2010,6 @@ class _HabitCard extends StatelessWidget {
                     fontStyle: FontStyle.italic,
                   ),
                 ),
-              ),
-            ],
-
-            // Recent urges
-            if (lastUrges.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: lastUrges
-                    .map((iso) => Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: colors.ink.withValues(alpha: 0.05),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            iso.replaceFirst('T', ' ').split('.').first,
-                            style: TextStyle(fontSize: 11, color: colors.ink.withValues(alpha: 0.3)),
-                          ),
-                        ))
-                    .toList(),
               ),
             ],
           ],
@@ -2212,22 +2298,33 @@ class _CalendarViewState extends State<CalendarView> {
 
   // Precomputed once (not on every markerBuilder call) so opening/paging the
   // calendar doesn't re-parse every urgeLog entry for every visible day cell.
-  late final Map<DateTime, List<Habit>> _habitsByDay = _buildIndex();
+  // Carries the exact timestamp (not just the habit) so the day list can
+  // show when each urge was resisted -- that detail now only lives here,
+  // not on the habit card itself.
+  late final Map<DateTime, List<MapEntry<Habit, DateTime>>> _habitsByDay = _buildIndex();
 
-  Map<DateTime, List<Habit>> _buildIndex() {
-    final index = <DateTime, List<Habit>>{};
+  Map<DateTime, List<MapEntry<Habit, DateTime>>> _buildIndex() {
+    final index = <DateTime, List<MapEntry<Habit, DateTime>>>{};
     for (final h in widget.habits) {
       for (final iso in h.urgeLog) {
         final dt = DateTime.parse(iso);
         final key = DateTime(dt.year, dt.month, dt.day);
-        (index[key] ??= []).add(h);
+        (index[key] ??= []).add(MapEntry(h, dt));
       }
     }
     return index;
   }
 
-  List<Habit> habitsOnDay(DateTime day) {
+  List<MapEntry<Habit, DateTime>> habitsOnDay(DateTime day) {
     return _habitsByDay[DateTime(day.year, day.month, day.day)] ?? const [];
+  }
+
+  static String _formatTime(DateTime dt) {
+    final hour24 = dt.hour;
+    final period = hour24 >= 12 ? "PM" : "AM";
+    final hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+    final minute = dt.minute.toString().padLeft(2, "0");
+    return "$hour12:$minute $period";
   }
 
   @override
@@ -2290,21 +2387,35 @@ class _CalendarViewState extends State<CalendarView> {
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, _) {
-                final h = habitsOnDay(day);
-                if (h.isEmpty) return null;
+                final entries = habitsOnDay(day);
+                if (entries.isEmpty) return null;
+                // Stretch across the full cell so LayoutBuilder below gets a
+                // real bounded width to fit dots into, instead of an
+                // unconstrained row that just keeps growing past the cell.
                 return Positioned(
                   bottom: 4,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: h.map((habit) => Container(
-                      width: 5,
-                      height: 5,
-                      margin: const EdgeInsets.symmetric(horizontal: 1),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Color(habit.colorValue),
-                      ),
-                    )).toList(),
+                  left: 0,
+                  right: 0,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      const dotFootprint = 7.0; // 5px dot + 1px margin each side
+                      final maxDots = (constraints.maxWidth / dotFootprint)
+                          .floor()
+                          .clamp(1, entries.length);
+                      return Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: entries.take(maxDots).map((entry) => Container(
+                          width: 5,
+                          height: 5,
+                          margin: const EdgeInsets.symmetric(horizontal: 1),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Color(entry.key.colorValue),
+                          ),
+                        )).toList(),
+                      );
+                    },
                   ),
                 );
               },
@@ -2332,7 +2443,7 @@ class _CalendarViewState extends State<CalendarView> {
                           ),
                         ),
                         const SizedBox(height: 10),
-                        ...onDay.map((h) => Padding(
+                        ...onDay.map((entry) => Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: Row(
                             children: [
@@ -2342,15 +2453,19 @@ class _CalendarViewState extends State<CalendarView> {
                                 margin: const EdgeInsets.only(right: 10),
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: Color(h.colorValue),
+                                  color: Color(entry.key.colorValue),
                                 ),
                               ),
                               Expanded(
                                 child: Text(
-                                  h.name,
+                                  entry.key.name,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(color: colors.ink.withValues(alpha: 0.7)),
                                 ),
+                              ),
+                              Text(
+                                _formatTime(entry.value),
+                                style: TextStyle(fontSize: 12, color: colors.ink.withValues(alpha: 0.4)),
                               ),
                             ],
                           ),
