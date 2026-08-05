@@ -451,6 +451,52 @@ class NopeApp extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LOADING SCREEN — shown while AppEntry checks whether the intro has been
+// seen. Reuses the same "noo-no." wag-finger animation as the native splash
+// so the two hand off to each other without a visual jump cut.
+// ─────────────────────────────────────────────────────────────────────────────
+class LoadingScreen extends StatelessWidget {
+  const LoadingScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Scaffold(
+      backgroundColor: colors.bg,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset(
+              'assets/loading/nope_bw.gif',
+              width: 140,
+              height: 140,
+              filterQuality: FilterQuality.medium,
+              // Falls back to just the wordmark below if the asset isn't
+              // bundled (e.g. pubspec.yaml assets not registered / `flutter
+              // pub get` not run yet) instead of throwing and breaking the
+              // whole loading screen.
+              errorBuilder: (context, error, stackTrace) =>
+                  const SizedBox(width: 140, height: 140),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              "nope.",
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+                color: colors.ink.withValues(alpha: 0.7),
+                letterSpacing: -1,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ENTRY — checks if intro has been seen
 // ─────────────────────────────────────────────────────────────────────────────
 class AppEntry extends StatefulWidget {
@@ -470,9 +516,24 @@ class _AppEntryState extends State<AppEntry> {
   }
 
   Future<void> _check() async {
-    final prefs = await SharedPreferences.getInstance();
-    final seen = prefs.getBool('seen_intro') ?? false;
+    // SharedPreferences.getInstance() usually resolves in a couple of
+    // milliseconds, which meant LoadingScreen was mounted and unmounted
+    // within a single frame -- effectively invisible. Racing it against a
+    // minimum-display timer guarantees the loading animation actually gets
+    // seen, while still resolving immediately if the prefs lookup is ever
+    // slower than this floor.
+    final results = await Future.wait([
+      _readSeenIntro(),
+      Future.delayed(const Duration(milliseconds: 900)),
+    ]);
+    final seen = results[0] as bool;
+    if (!mounted) return;
     setState(() => _showIntro = !seen);
+  }
+
+  Future<bool> _readSeenIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('seen_intro') ?? false;
   }
 
   void _onIntroComplete() async {
@@ -493,7 +554,7 @@ class _AppEntryState extends State<AppEntry> {
   @override
   Widget build(BuildContext context) {
     if (_showIntro == null) {
-      return Scaffold(backgroundColor: AppColors.of(context).bg);
+      return const LoadingScreen();
     }
     if (_showIntro!) {
       return IntroScreen(onComplete: _onIntroComplete);

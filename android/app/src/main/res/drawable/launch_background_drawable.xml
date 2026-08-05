@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Modify this file to customize your launch splash screen -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+
+    <!-- "nope." wag-finger mark, shown centered while the native splash is
+         up (before the Flutter engine takes over and hands off to
+         LoadingScreen in lib/main.dart). Static (first) frame of the same
+         black-and-white asset used for the in-app loading animation. -->
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/nope_splash" />
+    </item>
+</layer-list>
