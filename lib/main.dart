@@ -73,7 +73,7 @@ class AppColors {
   // and popups read as slightly translucent against the scaffold instead of
   // flat opaque panels.
   static const dark = AppColors(
-    bg: Color(0xFF080808),
+    bg: Color(0xFF121212),
     card: Color(0xE6111111),
     dialogBg: Color(0xCC141414),
     raised: Color(0xFF1A1A1A),
@@ -453,41 +453,144 @@ class NopeApp extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // LOADING SCREEN — shown while AppEntry checks whether the intro has been
 // seen. Reuses the same "noo-no." wag-finger animation as the native splash
-// so the two hand off to each other without a visual jump cut.
+// so the two hand off to each other without a visual jump cut. The wordmark
+// is staged in on top of it: finger waves alone, then "nope" slams in, then
+// "." slams in beside it a beat later.
 // ─────────────────────────────────────────────────────────────────────────────
-class LoadingScreen extends StatelessWidget {
+class LoadingScreen extends StatefulWidget {
   const LoadingScreen({super.key});
+
+  @override
+  State<LoadingScreen> createState() => _LoadingScreenState();
+}
+
+// Desaturates the wag-finger gif to black-and-white so it reads as a plain
+// graphic mark rather than competing in color with the rest of the screen.
+const ColorFilter _greyscale = ColorFilter.matrix(<double>[
+  0.2126, 0.7152, 0.0722, 0, 0,
+  0.2126, 0.7152, 0.0722, 0, 0,
+  0.2126, 0.7152, 0.0722, 0, 0,
+  0, 0, 0, 1, 0,
+]);
+
+class _LoadingScreenState extends State<LoadingScreen>
+    with TickerProviderStateMixin {
+  late final AnimationController _handExitCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 400),
+  );
+  late final AnimationController _nopeCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  );
+  late final AnimationController _dotCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 350),
+  );
+
+  late final Animation<double> _handExit = CurvedAnimation(
+    parent: _handExitCtrl,
+    curve: Curves.easeIn,
+  );
+  late final Animation<double> _nopeScale = Tween<double>(begin: 0.4, end: 1.0)
+      .animate(CurvedAnimation(parent: _nopeCtrl, curve: Curves.easeOutBack));
+  late final Animation<double> _nopeFade = CurvedAnimation(
+    parent: _nopeCtrl,
+    curve: const Interval(0.0, 0.6, curve: Curves.easeOut),
+  );
+  late final Animation<double> _dotScale = Tween<double>(begin: 0.4, end: 1.0)
+      .animate(CurvedAnimation(parent: _dotCtrl, curve: Curves.easeOutBack));
+  late final Animation<double> _dotFade = CurvedAnimation(
+    parent: _dotCtrl,
+    curve: const Interval(0.0, 0.6, curve: Curves.easeOut),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _runSequence();
+  }
+
+  Future<void> _runSequence() async {
+    await Future.delayed(const Duration(milliseconds: 1500)); // finger plays alone
+    if (!mounted) return;
+    _handExitCtrl.forward(); // hand flies off to the left...
+    await Future.delayed(const Duration(milliseconds: 150));
+    if (!mounted) return;
+    await _nopeCtrl.forward(); // ...as "nope" slams into its place
+    await Future.delayed(const Duration(milliseconds: 250)); // short beat
+    if (!mounted) return;
+    await _dotCtrl.forward();
+  }
+
+  @override
+  void dispose() {
+    _handExitCtrl.dispose();
+    _nopeCtrl.dispose();
+    _dotCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final wordmarkStyle = TextStyle(
+      fontSize: 64,
+      fontWeight: FontWeight.w900,
+      color: colors.ink,
+      letterSpacing: -3,
+    );
     return Scaffold(
       backgroundColor: colors.bg,
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: Stack(
+          alignment: Alignment.center,
           children: [
-            Image.asset(
-              'assets/loading/nope_bw.gif',
-              width: 140,
-              height: 140,
-              filterQuality: FilterQuality.medium,
-              // Falls back to just the wordmark below if the asset isn't
-              // bundled (e.g. pubspec.yaml assets not registered / `flutter
-              // pub get` not run yet) instead of throwing and breaking the
-              // whole loading screen.
-              errorBuilder: (context, error, stackTrace) =>
-                  const SizedBox(width: 140, height: 140),
-            ),
-            const SizedBox(height: 18),
-            Text(
-              "nope.",
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w900,
-                color: colors.ink.withValues(alpha: 0.7),
-                letterSpacing: -1,
+            AnimatedBuilder(
+              animation: _handExit,
+              builder: (context, child) => Opacity(
+                opacity: 1 - _handExit.value,
+                child: Transform.translate(
+                  offset: Offset(-140 * _handExit.value, 0),
+                  child: child,
+                ),
               ),
+              child: ColorFiltered(
+                colorFilter: _greyscale,
+                child: Image.asset(
+                  'assets/loading/noo-no.gif',
+                  width: 140,
+                  height: 140,
+                  filterQuality: FilterQuality.medium,
+                  // Falls back to nothing if the asset isn't bundled (e.g.
+                  // pubspec.yaml assets not registered / `flutter pub get`
+                  // not run yet) instead of throwing and breaking the whole
+                  // loading screen.
+                  errorBuilder: (context, error, stackTrace) =>
+                      const SizedBox(width: 140, height: 140),
+                ),
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                ScaleTransition(
+                  scale: _nopeScale,
+                  child: FadeTransition(
+                    opacity: _nopeFade,
+                    child: Text("nope", style: wordmarkStyle),
+                  ),
+                ),
+                ScaleTransition(
+                  scale: _dotScale,
+                  child: FadeTransition(
+                    opacity: _dotFade,
+                    child: Text(".", style: wordmarkStyle),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -508,6 +611,7 @@ class AppEntry extends StatefulWidget {
 
 class _AppEntryState extends State<AppEntry> {
   bool? _showIntro;
+  List<Habit> _habits = [];
 
   @override
   void initState() {
@@ -521,19 +625,40 @@ class _AppEntryState extends State<AppEntry> {
     // within a single frame -- effectively invisible. Racing it against a
     // minimum-display timer guarantees the loading animation actually gets
     // seen, while still resolving immediately if the prefs lookup is ever
-    // slower than this floor.
+    // slower than this floor. Habits are decoded here too (not just
+    // seen_intro) so NopeHome's first frame already has real data instead of
+    // flashing empty state while it does its own prefs read.
+    //
+    // 3200ms gives LoadingScreen's own staged animation (finger alone ->
+    // hand flies off -> "nope" slams into its place -> "." slams in,
+    // landing at ~2750ms) room to fully play out plus a brief settled hold
+    // before this screen gets swapped away -- see LoadingScreen._runSequence.
     final results = await Future.wait([
-      _readSeenIntro(),
-      Future.delayed(const Duration(milliseconds: 900)),
+      _readInitialState(),
+      Future.delayed(const Duration(milliseconds: 3200)),
     ]);
-    final seen = results[0] as bool;
+    final initial = results[0] as _InitialState;
     if (!mounted) return;
-    setState(() => _showIntro = !seen);
+    setState(() {
+      _showIntro = !initial.seenIntro;
+      _habits = initial.habits;
+    });
   }
 
-  Future<bool> _readSeenIntro() async {
+  Future<_InitialState> _readInitialState() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('seen_intro') ?? false;
+    final seenIntro = prefs.getBool('seen_intro') ?? false;
+    final raw = prefs.getString('habits');
+    var habits = <Habit>[];
+    if (raw != null && raw.isNotEmpty) {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      habits = list.map(Habit.fromJson).toList();
+      final now = DateTime.now();
+      for (final h in habits) {
+        h.refreshForToday(now);
+      }
+    }
+    return _InitialState(seenIntro: seenIntro, habits: habits);
   }
 
   void _onIntroComplete() async {
@@ -553,14 +678,29 @@ class _AppEntryState extends State<AppEntry> {
 
   @override
   Widget build(BuildContext context) {
+    Widget child;
+    Key key;
     if (_showIntro == null) {
-      return const LoadingScreen();
+      child = const LoadingScreen();
+      key = const ValueKey('loading');
+    } else if (_showIntro!) {
+      child = IntroScreen(onComplete: _onIntroComplete);
+      key = const ValueKey('intro');
+    } else {
+      child = NopeHome(initialHabits: _habits);
+      key = const ValueKey('home');
     }
-    if (_showIntro!) {
-      return IntroScreen(onComplete: _onIntroComplete);
-    }
-    return const NopeHome();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      child: KeyedSubtree(key: key, child: child),
+    );
   }
+}
+
+class _InitialState {
+  const _InitialState({required this.seenIntro, required this.habits});
+  final bool seenIntro;
+  final List<Habit> habits;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -968,7 +1108,12 @@ class ResetConfirmation {
 // HOME
 // ─────────────────────────────────────────────────────────────────────────────
 class NopeHome extends StatefulWidget {
-  const NopeHome({super.key});
+  const NopeHome({super.key, this.initialHabits = const []});
+
+  // Preloaded by AppEntry during the loading screen's minimum-display
+  // window, so the first frame here already has real data instead of
+  // flashing _EmptyState while _loadHabits does its own prefs read.
+  final List<Habit> initialHabits;
 
   @override
   State<NopeHome> createState() => _NopeHomeState();
@@ -1032,6 +1177,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    habits = widget.initialHabits;
     _confettiController = ConfettiController(duration: const Duration(milliseconds: 900));
     _loadHabits();
   }
@@ -1922,16 +2068,40 @@ class _HabitCardState extends State<_HabitCard> {
     // AnimatedBuilder subscribes directly to `habit` (a ChangeNotifier), so
     // this is the *only* widget that rebuilds when this habit changes —
     // tapping NOPE on one card no longer touches the other cards at all.
+    final colors = AppColors.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return RepaintBoundary(
       child: AnimatedBuilder(
         animation: habit,
-        builder: (context, _) => _buildCard(context),
+        // Opacity here composites the *entire* already-rendered card (icon,
+        // text, and all) as one semi-transparent layer over whatever's
+        // behind it, unlike the fill/gradient alphas inside _buildCard
+        // which only blend the background panel underneath the content.
+        // This is what actually reads as "the card's opacity is turned
+        // down" rather than "the card's background color is lighter." The
+        // outline is drawn separately via foregroundDecoration, on top of
+        // and unaffected by that inner Opacity, so the card's edge stays
+        // crisp/dark instead of fading along with everything else.
+        builder: (context, _) => Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          foregroundDecoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: colors.ink.withValues(alpha: isDark ? 0.14 : 0.06),
+            ),
+          ),
+          child: Opacity(
+            opacity: isDark ? 0.88 : 1.0,
+            child: _buildCard(context),
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildCard(BuildContext context) {
     final colors = AppColors.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
 
@@ -1941,13 +2111,16 @@ class _HabitCardState extends State<_HabitCard> {
     _lastKnownStreak = currentStreak;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         // Translucent card panel (same treatment as every other card/popup
         // in the app) with the habit's own color tinted on top -- without
         // this base fill the card was just a faint color wash with nothing
         // solid behind it, so the transparency change was invisible here.
-        color: colors.card,
+        // Dark mode's scaffold background is brightened slightly (see
+        // AppColors.dark.bg) to give this extra-transparent fill something
+        // to show through. The outline lives on the wrapper in build() now
+        // (outside this widget's Opacity), so it isn't duplicated here.
+        color: isDark ? colors.card.withValues(alpha: 0.4) : colors.card,
         gradient: LinearGradient(
           colors: [
             habitColor.withValues(alpha: 0.24),
@@ -1957,6 +2130,13 @@ class _HabitCardState extends State<_HabitCard> {
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.06),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
@@ -2274,22 +2454,56 @@ class _NopeButtonState extends State<_NopeButton> {
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedScale(
         scale: _pressed ? 0.91 : 1.0,
-        duration: const Duration(milliseconds: 100),
+        duration: const Duration(milliseconds: 90),
         curve: Curves.easeOut,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
+          // A normal tap's press-to-release is faster than this used to be
+          // (300ms) -- the pressed look never had time to actually appear
+          // before onTapUp reversed it, so the button read as static no
+          // matter how different the two decorations were on paper. 90ms
+          // (matching the AnimatedScale above) lets it actually register.
+          duration: const Duration(milliseconds: 90),
+          curve: Curves.easeOut,
           width: 130,
           height: 130,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: bg,
+            // A flat single-color fill with a thin border read as a plain
+            // circle with text on it, not a pressable button. A subtle
+            // top-left-to-bottom-right gradient gives it a rounded, glossy
+            // surface at rest; pressed inverts and darkens that gradient and
+            // nearly flattens the shadow, simulating the button sinking
+            // into the surface instead of just a faint tint shift.
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: widget.tappedToday
+                  ? [bg, bg]
+                  : _pressed
+                      ? [
+                          Color.lerp(bg, Colors.black, 0.22)!,
+                          Color.lerp(bg, Colors.black, 0.30)!,
+                        ]
+                      : [
+                          Color.lerp(bg, colors.ink, 0.08)!,
+                          Color.lerp(bg, Colors.black, 0.10)!,
+                        ],
+            ),
             border: Border.all(
-              color: widget.tappedToday ? widget.color : colors.ink.withValues(alpha: 0.12),
-              width: widget.tappedToday ? 2 : 1,
+              color: widget.tappedToday
+                  ? widget.color
+                  : colors.ink.withValues(alpha: _pressed ? 0.28 : 0.16),
+              width: widget.tappedToday ? 2 : 1.5,
             ),
             boxShadow: widget.tappedToday
                 ? [BoxShadow(color: widget.color.withValues(alpha: 0.25), blurRadius: 20, spreadRadius: 4)]
-                : [],
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: _pressed ? 0.08 : 0.32),
+                      blurRadius: _pressed ? 2 : 18,
+                      offset: Offset(0, _pressed ? 1 : 9),
+                    ),
+                  ],
           ),
           child: Center(
             child: AnimatedDefaultTextStyle(
