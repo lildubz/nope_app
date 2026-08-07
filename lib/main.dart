@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:confetti/confetti.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
@@ -29,6 +31,16 @@ final Map<String, Color> presetColors = {
 // App-wide accent color. Used for the FAB, calendar selection, and focused
 // inputs -- anywhere the UI needs a fixed accent rather than a per-habit color.
 const Color kAccent = Color(0xFF5490D7); // Blue
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TABLET SCALING — this app is otherwise a fixed phone-width layout, so on a
+// tablet's much larger canvas every fixed-size element (icons, the NOPE
+// circle, card padding) reads as tiny and sparse. Text already scales up on
+// its own via the app-wide TextScaler set in NopeApp, so this helper is only
+// for non-text, pixel-sized things that scaler can't touch.
+bool isTablet(BuildContext context) => MediaQuery.of(context).size.shortestSide >= 600;
+
+double tabletScale(BuildContext context) => isTablet(context) ? 1.65 : 1.0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THEME (light / dark)
@@ -348,6 +360,7 @@ Widget _customColorCardSwatch({
   required bool isCustom,
   required VoidCallback onTap,
   required Color ink,
+  double scale = 1.0,
 }) {
   return Expanded(
     child: GestureDetector(
@@ -355,7 +368,7 @@ Widget _customColorCardSwatch({
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeOut,
-        height: 52,
+        height: 52 * scale,
         decoration: BoxDecoration(
           color: isCustom ? current.withValues(alpha: 0.22) : ink.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(14),
@@ -363,15 +376,15 @@ Widget _customColorCardSwatch({
         ),
         child: Center(
           child: Container(
-            width: 18,
-            height: 18,
+            width: 18 * scale,
+            height: 18 * scale,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: isCustom ? current : null,
               gradient: isCustom ? null : _customSwatchGradient,
               boxShadow: isCustom ? [BoxShadow(color: current.withValues(alpha: 0.6), blurRadius: 8)] : [],
             ),
-            child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 10),
+            child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 10 * scale),
           ),
         ),
       ),
@@ -408,14 +421,14 @@ bool _isPresetColor(Color c) => presetColors.values.any((p) => p.value == c.valu
 // app's bold-header, plain-body look (the default AlertDialog text theme is
 // much lighter-weight and reads as a different font at a glance).
 TextStyle dialogTitleStyle(BuildContext context) => TextStyle(
-      fontSize: 19,
+      fontSize: 19 * tabletScale(context),
       fontWeight: FontWeight.w800,
       letterSpacing: -0.4,
       color: AppColors.of(context).ink,
     );
 
 TextStyle dialogBodyStyle(BuildContext context) => TextStyle(
-      fontSize: 14.5,
+      fontSize: 14.5 * tabletScale(context),
       fontWeight: FontWeight.w500,
       height: 1.35,
       color: AppColors.of(context).ink.withValues(alpha: 0.75),
@@ -444,6 +457,19 @@ class NopeApp extends StatelessWidget {
           darkTheme: buildAppTheme(Brightness.dark),
           home: const AppEntry(),
           debugShowCheckedModeBanner: false,
+          builder: (context, child) {
+            // Scales every Text widget app-wide on tablet-sized screens (see
+            // tabletScale) -- multiplying the *existing* scaler rather than
+            // replacing it so a user's own accessibility text-size setting
+            // still stacks on top instead of being clobbered.
+            final mq = MediaQuery.of(context);
+            if (mq.size.shortestSide < 600) return child!;
+            final scaled = mq.textScaler.scale(1.0) * 1.6;
+            return MediaQuery(
+              data: mq.copyWith(textScaler: TextScaler.linear(scaled)),
+              child: child!,
+            );
+          },
         );
       },
     );
@@ -535,10 +561,10 @@ class _LoadingScreenState extends State<LoadingScreen>
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final wordmarkStyle = TextStyle(
-      fontSize: 64,
+      fontSize: 120,
       fontWeight: FontWeight.w900,
       color: colors.ink,
-      letterSpacing: -3,
+      letterSpacing: -5,
     );
     return Scaffold(
       backgroundColor: colors.bg,
@@ -609,14 +635,36 @@ class AppEntry extends StatefulWidget {
   State<AppEntry> createState() => _AppEntryState();
 }
 
-class _AppEntryState extends State<AppEntry> {
+class _AppEntryState extends State<AppEntry> with WidgetsBindingObserver {
   bool? _showIntro;
+  bool _locked = false;
   List<Habit> _habits = [];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _check();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Only re-lock once the initial load/intro flow is behind us -- there's
+    // nothing worth protecting yet during loading or the one-time intro.
+    if (state == AppLifecycleState.paused && _showIntro == false) {
+      _reLockIfNeeded();
+    }
+  }
+
+  Future<void> _reLockIfNeeded() async {
+    final hasPasscode = await PasscodeStore.hasPasscode();
+    if (hasPasscode && mounted) setState(() => _locked = true);
   }
 
   Future<void> _check() async {
@@ -642,6 +690,7 @@ class _AppEntryState extends State<AppEntry> {
     setState(() {
       _showIntro = !initial.seenIntro;
       _habits = initial.habits;
+      _locked = initial.hasPasscode;
     });
   }
 
@@ -658,22 +707,17 @@ class _AppEntryState extends State<AppEntry> {
         h.refreshForToday(now);
       }
     }
-    return _InitialState(seenIntro: seenIntro, habits: habits);
+    final hasPasscode = await PasscodeStore.hasPasscode();
+    return _InitialState(seenIntro: seenIntro, habits: habits, hasPasscode: hasPasscode);
   }
 
   void _onIntroComplete() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('seen_intro', true);
-    if (mounted) {
-      Navigator.of(context).pushReplacement(
-        PageRouteBuilder(
-          pageBuilder: (_, _, _) => const NopeHome(),
-          transitionDuration: const Duration(milliseconds: 600),
-          transitionsBuilder: (_, anim, _, child) =>
-              FadeTransition(opacity: anim, child: child),
-        ),
-      );
-    }
+    // setState (not a Navigator push) so this widget -- and the lifecycle
+    // observer above that drives re-locking on resume -- stays mounted for
+    // the rest of the app's life instead of being replaced away.
+    if (mounted) setState(() => _showIntro = false);
   }
 
   @override
@@ -683,6 +727,9 @@ class _AppEntryState extends State<AppEntry> {
     if (_showIntro == null) {
       child = const LoadingScreen();
       key = const ValueKey('loading');
+    } else if (_locked) {
+      child = LockScreen(onUnlocked: () => setState(() => _locked = false));
+      key = const ValueKey('lock');
     } else if (_showIntro!) {
       child = IntroScreen(onComplete: _onIntroComplete);
       key = const ValueKey('intro');
@@ -698,9 +745,10 @@ class _AppEntryState extends State<AppEntry> {
 }
 
 class _InitialState {
-  const _InitialState({required this.seenIntro, required this.habits});
+  const _InitialState({required this.seenIntro, required this.habits, required this.hasPasscode});
   final bool seenIntro;
   final List<Habit> habits;
+  final bool hasPasscode;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -773,96 +821,107 @@ class _IntroScreenState extends State<IntroScreen>
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Spacer(flex: 3),
-              // Big title
-              FadeTransition(
-                opacity: _titleFade,
-                child: SlideTransition(
-                  position: _titleSlide,
-                  child: Text(
-                    "nope.",
-                    style: TextStyle(
-                      fontSize: 88,
-                      fontWeight: FontWeight.w900,
-                      color: colors.ink,
-                      letterSpacing: -4,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              // Animated line
-              AnimatedBuilder(
-                animation: _lineWidth,
-                builder: (_, _) => Container(
-                  height: 2,
-                  width: _lineWidth.value * (w - 64),
-                  color: colors.ink,
-                ),
-              ),
-              const SizedBox(height: 20),
-              // Tagline
-              FadeTransition(
-                opacity: _subFade,
-                child: Text(
-                  "resist the urge.\ntrack the streak.\ngrow the streak.",
-                  style: TextStyle(
-                    fontSize: 20,
-                    color: colors.ink.withValues(alpha: 0.55),
-                    fontWeight: FontWeight.w400,
-                    height: 1.6,
-                    letterSpacing: -0.3,
-                  ),
-                ),
-              ),
-              const Spacer(flex: 2),
-              // Features
-              FadeTransition(
-                opacity: _subFade,
-                child: const Column(
-                  children: [
-                    _IntroFeature(icon: Icons.block, text: "Hit NOPE once a day per habit"),
-                    SizedBox(height: 14),
-                    _IntroFeature(icon: Icons.local_fire_department, text: "Build streaks. Don't break the chain."),
-                    SizedBox(height: 14),
-                    _IntroFeature(icon: Icons.calendar_month, text: "See your wins on a calendar"),
-                  ],
-                ),
-              ),
-              const Spacer(flex: 2),
-              // CTA button -- inverted (ink bg / bg text) so it stays high
-              // contrast in both light and dark mode.
-              FadeTransition(
-                opacity: _btnFade,
-                child: _PressableButton(
-                  onTap: widget.onComplete,
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 20),
-                    decoration: BoxDecoration(
-                      color: colors.ink,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Center(
+          // Fixed-size content (88px title, multi-line tagline, three feature
+          // rows, a padded CTA) with fixed gaps -- rather than Spacers -- so
+          // spacing stays comfortable and consistent instead of collapsing
+          // to nothing on a short landscape phone. Center() absorbs any
+          // extra room on taller screens; SingleChildScrollView is a
+          // fallback for screens too short to fit even the fixed spacing.
+          child: SingleChildScrollView(
+            child: Center(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 32),
+                  // Big title
+                  FadeTransition(
+                    opacity: _titleFade,
+                    child: SlideTransition(
+                      position: _titleSlide,
                       child: Text(
-                        "let's go →",
+                        "nope.",
                         style: TextStyle(
-                          color: colors.bg,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.3,
+                          fontSize: 88,
+                          fontWeight: FontWeight.w900,
+                          color: colors.ink,
+                          letterSpacing: -4,
+                          height: 1.0,
                         ),
                       ),
                     ),
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  // Animated line
+                  AnimatedBuilder(
+                    animation: _lineWidth,
+                    builder: (_, _) => Container(
+                      height: 2,
+                      width: _lineWidth.value * (w - 64),
+                      color: colors.ink,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // Tagline
+                  FadeTransition(
+                    opacity: _subFade,
+                    child: Text(
+                      "resist the urge.\ntrack the streak.\ngrow the streak.",
+                      style: TextStyle(
+                        fontSize: 20,
+                        color: colors.ink.withValues(alpha: 0.55),
+                        fontWeight: FontWeight.w400,
+                        height: 1.6,
+                        letterSpacing: -0.3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 40),
+                  // Features
+                  FadeTransition(
+                    opacity: _subFade,
+                    child: const Column(
+                      children: [
+                        _IntroFeature(icon: Icons.block, text: "Hit NOPE once a day per habit"),
+                        SizedBox(height: 14),
+                        _IntroFeature(icon: Icons.local_fire_department, text: "Build streaks. Don't break the chain."),
+                        SizedBox(height: 14),
+                        _IntroFeature(icon: Icons.calendar_month, text: "See your wins on a calendar"),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 40),
+                  // CTA button -- inverted (ink bg / bg text) so it stays high
+                  // contrast in both light and dark mode.
+                  FadeTransition(
+                    opacity: _btnFade,
+                    child: _PressableButton(
+                      onTap: widget.onComplete,
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 20),
+                        decoration: BoxDecoration(
+                          color: colors.ink,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Center(
+                          child: Text(
+                            "let's go →",
+                            style: TextStyle(
+                              color: colors.bg,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                ],
               ),
-              const SizedBox(height: 48),
-            ],
+            ),
           ),
         ),
       ),
@@ -891,6 +950,655 @@ class _IntroFeature extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APP LOCK — 4-digit passcode + optional biometric unlock, gating access to
+// the app past the loading screen. The passcode is stored as a SHA-256 hash
+// (never plaintext) -- hashing here is mostly to avoid a raw prefs-file dump
+// handing over the code directly; a 4-digit code only has 10,000
+// combinations either way, so this isn't meant to resist real brute force.
+// ─────────────────────────────────────────────────────────────────────────────
+class PasscodeStore {
+  PasscodeStore._();
+
+  static const _hashKey = 'lock_passcode_hash';
+  static const _biometricKey = 'lock_biometric_enabled';
+
+  static String _hash(String code) => sha256.convert(utf8.encode(code)).toString();
+
+  static Future<bool> hasPasscode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_hashKey) != null;
+  }
+
+  static Future<void> setPasscode(String code) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_hashKey, _hash(code));
+  }
+
+  static Future<void> clearPasscode() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_hashKey);
+    await prefs.remove(_biometricKey);
+  }
+
+  static Future<bool> verify(String code) async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(_hashKey);
+    return stored != null && stored == _hash(code);
+  }
+
+  static Future<bool> isBiometricEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_biometricKey) ?? false;
+  }
+
+  static Future<void> setBiometricEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_biometricKey, enabled);
+  }
+}
+
+// Four dots showing how many digits have been typed so far. Filled dots turn
+// red instead of accent-blue on a rejected attempt, matching the shake that
+// plays alongside it.
+class _PinDots extends StatelessWidget {
+  final int length;
+  final int filled;
+  final bool error;
+  const _PinDots({required this.length, required this.filled, this.error = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(length, (i) {
+        final isFilled = i < filled;
+        return Container(
+          margin: EdgeInsets.symmetric(horizontal: 8 * scale),
+          width: 16 * scale,
+          height: 16 * scale,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: isFilled ? (error ? Colors.redAccent : kAccent) : Colors.transparent,
+            border: Border.all(
+              color: error ? Colors.redAccent : colors.ink.withValues(alpha: 0.3),
+              width: 1.5 * scale,
+            ),
+          ),
+        );
+      }),
+    );
+  }
+}
+
+// Shared 0-9 + backspace grid for every passcode screen (lock, set, confirm,
+// verify). The bottom-left slot shows a fingerprint button when biometric
+// retry is offered, and is otherwise blank so the "0" stays centered.
+class _NumericKeypad extends StatelessWidget {
+  final ValueChanged<String> onDigit;
+  final VoidCallback onBackspace;
+  final VoidCallback? onBiometricTap;
+
+  const _NumericKeypad({required this.onDigit, required this.onBackspace, this.onBiometricTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Keys are square. Sizing them from width alone (the old
+        // Expanded+AspectRatio approach) works in portrait but blows up in
+        // landscape, where width vastly exceeds height -- the keypad ends up
+        // taller than the screen. The caller wraps this in an Expanded, so
+        // constraints.maxHeight here is the real bounded leftover space --
+        // bound by both dimensions so the keypad can never overflow it.
+        final keySize = math.min(constraints.maxWidth / 3, constraints.maxHeight / 4);
+
+        Widget key({String? label, IconData? icon, VoidCallback? onTap}) {
+          return SizedBox(
+            width: keySize,
+            height: keySize,
+            child: Padding(
+              padding: EdgeInsets.all(8 * scale),
+              child: Material(
+                color: Colors.transparent,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: onTap,
+                  child: Center(
+                    child: icon != null
+                        ? Icon(icon, color: colors.ink.withValues(alpha: 0.7), size: 24 * scale)
+                        : Text(
+                            label ?? '',
+                            style: TextStyle(fontSize: 26 * scale, fontWeight: FontWeight.w600, color: colors.ink),
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        return Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [key(label: '1', onTap: () => onDigit('1')), key(label: '2', onTap: () => onDigit('2')), key(label: '3', onTap: () => onDigit('3'))]),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [key(label: '4', onTap: () => onDigit('4')), key(label: '5', onTap: () => onDigit('5')), key(label: '6', onTap: () => onDigit('6'))]),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [key(label: '7', onTap: () => onDigit('7')), key(label: '8', onTap: () => onDigit('8')), key(label: '9', onTap: () => onDigit('9'))]),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              key(icon: onBiometricTap != null ? Icons.fingerprint : null, onTap: onBiometricTap),
+              key(label: '0', onTap: () => onDigit('0')),
+              key(icon: Icons.backspace_outlined, onTap: onBackspace),
+            ]),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// The shake-on-wrong-attempt animation shared by the lock screen and the
+// passcode step screen -- factored out since both need the exact same
+// "wiggle that decays over the animation" curve.
+double _shakeOffset(AnimationController ctrl) {
+  final t = ctrl.value;
+  return math.sin(t * 14) * 8 * (1 - t);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOCK SCREEN — shown at cold start (if a passcode is set) and again after
+// the app is backgrounded and resumed. Auto-triggers biometric auth once on
+// entry if enabled; the fingerprint key on the keypad lets the user retry
+// after a cancel/failure without backing out to the passcode.
+// ─────────────────────────────────────────────────────────────────────────────
+class LockScreen extends StatefulWidget {
+  final VoidCallback onUnlocked;
+  const LockScreen({required this.onUnlocked, super.key});
+
+  @override
+  State<LockScreen> createState() => _LockScreenState();
+}
+
+class _LockScreenState extends State<LockScreen> with SingleTickerProviderStateMixin {
+  final LocalAuthentication _localAuth = LocalAuthentication();
+  String _entered = '';
+  bool _error = false;
+  bool _biometricEnabled = false;
+  bool _checkingBiometric = false;
+
+  late final AnimationController _shakeCtrl =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    final enabled = await PasscodeStore.isBiometricEnabled();
+    if (!mounted) return;
+    setState(() => _biometricEnabled = enabled);
+    if (enabled) _tryBiometric();
+  }
+
+  Future<void> _tryBiometric() async {
+    if (_checkingBiometric) return;
+    _checkingBiometric = true;
+    try {
+      final supported = await _localAuth.isDeviceSupported();
+      if (!supported) return;
+      final ok = await _localAuth.authenticate(
+        localizedReason: 'Unlock nope.',
+        options: const AuthenticationOptions(biometricOnly: true, stickyAuth: true),
+      );
+      if (ok && mounted) widget.onUnlocked();
+    } catch (_) {
+      // Falls back to the passcode keypad -- a biometric error shouldn't
+      // strand the user with no way in.
+    } finally {
+      _checkingBiometric = false;
+    }
+  }
+
+  Future<void> _onDigit(String d) async {
+    if (_entered.length >= 4) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _entered += d;
+      _error = false;
+    });
+    if (_entered.length == 4) {
+      final ok = await PasscodeStore.verify(_entered);
+      if (ok) {
+        widget.onUnlocked();
+        return;
+      }
+      HapticFeedback.heavyImpact();
+      _shakeCtrl.forward(from: 0);
+      setState(() => _error = true);
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (mounted) setState(() => _entered = '');
+    }
+  }
+
+  void _onBackspace() {
+    if (_entered.isEmpty) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _entered = _entered.substring(0, _entered.length - 1);
+      _error = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _shakeCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    return Scaffold(
+      backgroundColor: colors.bg,
+      body: SafeArea(
+        child: Column(
+          children: [
+            const Spacer(),
+            Text('nope.', style: TextStyle(fontSize: 40 * scale, fontWeight: FontWeight.w900, color: colors.ink, letterSpacing: -2)),
+            const SizedBox(height: 8),
+            Text(
+              'Enter passcode',
+              style: TextStyle(fontSize: 15 * scale, color: colors.ink.withValues(alpha: 0.55), fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 32),
+            AnimatedBuilder(
+              animation: _shakeCtrl,
+              builder: (context, child) => Transform.translate(offset: Offset(_shakeOffset(_shakeCtrl), 0), child: child),
+              child: _PinDots(length: 4, filled: _entered.length, error: _error),
+            ),
+            Expanded(
+              flex: 10,
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: _NumericKeypad(
+                    onDigit: _onDigit,
+                    onBackspace: _onBackspace,
+                    onBiometricTap: _biometricEnabled ? _tryBiometric : null,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// A single full-screen passcode-entry step, pushed via Navigator. Used for
+// both "type a new code" (validate == null -- just pops with what was typed)
+// and "confirm/verify a code" (validate returns an error message to show +
+// shake on a wrong attempt, or null to accept and pop with the code). Shared
+// by AppLockFlows below so the setup/change/disable flows all look and feel
+// exactly like the lock screen itself.
+class _PasscodeStepScreen extends StatefulWidget {
+  final String title;
+  final Future<String?> Function(String code)? validate;
+
+  const _PasscodeStepScreen({required this.title, this.validate});
+
+  @override
+  State<_PasscodeStepScreen> createState() => _PasscodeStepScreenState();
+}
+
+class _PasscodeStepScreenState extends State<_PasscodeStepScreen> with SingleTickerProviderStateMixin {
+  String _entered = '';
+  String? _errorText;
+
+  late final AnimationController _shakeCtrl =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+
+  Future<void> _onDigit(String d) async {
+    if (_entered.length >= 4) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _entered += d;
+      _errorText = null;
+    });
+    if (_entered.length != 4) return;
+
+    if (widget.validate == null) {
+      Navigator.pop(context, _entered);
+      return;
+    }
+    final error = await widget.validate!(_entered);
+    if (error == null) {
+      if (mounted) Navigator.pop(context, _entered);
+      return;
+    }
+    HapticFeedback.heavyImpact();
+    _shakeCtrl.forward(from: 0);
+    setState(() => _errorText = error);
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (mounted) setState(() => _entered = '');
+  }
+
+  void _onBackspace() {
+    if (_entered.isEmpty) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _entered = _entered.substring(0, _entered.length - 1);
+      _errorText = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _shakeCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    return Scaffold(
+      backgroundColor: colors.bg,
+      appBar: AppBar(
+        backgroundColor: colors.bg,
+        elevation: 0,
+        toolbarHeight: kToolbarHeight * scale,
+        iconTheme: IconThemeData(color: colors.ink, size: 24 * scale),
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                widget.title,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 20 * scale, fontWeight: FontWeight.w800, color: colors.ink),
+              ),
+            ),
+            const SizedBox(height: 28),
+            AnimatedBuilder(
+              animation: _shakeCtrl,
+              builder: (context, child) => Transform.translate(offset: Offset(_shakeOffset(_shakeCtrl), 0), child: child),
+              child: _PinDots(length: 4, filled: _entered.length, error: _errorText != null),
+            ),
+            if (_errorText != null) ...[
+              const SizedBox(height: 12),
+              Text(_errorText!, style: TextStyle(color: Colors.redAccent, fontSize: 13 * scale, fontWeight: FontWeight.w600)),
+            ],
+            Expanded(
+              flex: 10,
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: _NumericKeypad(onDigit: _onDigit, onBackspace: _onBackspace),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Orchestrates the multi-step passcode flows launched from SettingsScreen.
+// Kept separate from PasscodeStore (pure storage) and _PasscodeStepScreen
+// (pure single-step UI) so each piece has one job.
+class AppLockFlows {
+  AppLockFlows._();
+
+  /// Enter once, confirm, save. Returns true if a passcode was set, false if
+  /// the user backed out at either step.
+  static Future<bool> setNewPasscode(BuildContext context) async {
+    final first = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const _PasscodeStepScreen(title: 'Choose a passcode')),
+    );
+    if (first == null || !context.mounted) return false;
+
+    final confirmed = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PasscodeStepScreen(
+          title: 'Confirm passcode',
+          validate: (code) async => code == first ? null : "Codes don't match — try again",
+        ),
+      ),
+    );
+    if (confirmed == null) return false;
+
+    await PasscodeStore.setPasscode(first);
+    return true;
+  }
+
+  /// Verifies the existing passcode before a sensitive change (disabling the
+  /// lock or setting a new code). Returns true once verified.
+  static Future<bool> verifyExisting(BuildContext context) async {
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PasscodeStepScreen(
+          title: 'Enter current passcode',
+          validate: (code) async => await PasscodeStore.verify(code) ? null : 'Incorrect passcode',
+        ),
+      ),
+    );
+    return result != null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS — app lock controls. Reachable from NopeHome's app bar.
+// ─────────────────────────────────────────────────────────────────────────────
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool _loading = true;
+  bool _hasPasscode = false;
+  bool _biometricEnabled = false;
+  bool _biometricAvailable = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final hasPasscode = await PasscodeStore.hasPasscode();
+    final biometricEnabled = await PasscodeStore.isBiometricEnabled();
+    var biometricAvailable = false;
+    try {
+      final localAuth = LocalAuthentication();
+      biometricAvailable = await localAuth.isDeviceSupported() && await localAuth.canCheckBiometrics;
+    } catch (_) {
+      // Query failing just means we hide the toggle -- passcode-only still works.
+    }
+    if (!mounted) return;
+    setState(() {
+      _hasPasscode = hasPasscode;
+      _biometricEnabled = biometricEnabled;
+      _biometricAvailable = biometricAvailable;
+      _loading = false;
+    });
+  }
+
+  Future<void> _togglePasscode(bool enable) async {
+    if (enable) {
+      await AppLockFlows.setNewPasscode(context);
+    } else {
+      final verified = await AppLockFlows.verifyExisting(context);
+      if (!verified) return;
+      await PasscodeStore.clearPasscode();
+    }
+    await _load();
+  }
+
+  Future<void> _changePasscode() async {
+    final verified = await AppLockFlows.verifyExisting(context);
+    if (!verified || !mounted) return;
+    await AppLockFlows.setNewPasscode(context);
+    await _load();
+  }
+
+  Future<void> _toggleBiometric(bool enabled) async {
+    await PasscodeStore.setBiometricEnabled(enabled);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    return Scaffold(
+      backgroundColor: colors.bg,
+      appBar: AppBar(
+        backgroundColor: colors.bg,
+        elevation: 0,
+        toolbarHeight: kToolbarHeight * scale,
+        iconTheme: IconThemeData(color: colors.ink, size: 24 * scale),
+        title: Text('Settings', style: TextStyle(color: colors.ink, fontWeight: FontWeight.w800, fontSize: 20 * scale)),
+      ),
+      body: _loading
+          ? const SizedBox.shrink()
+          : ListView(
+              children: [
+                SizedBox(height: 8 * scale),
+                _SettingsSwitchRow(
+                  scale: scale,
+                  title: 'Passcode lock',
+                  subtitle: 'Require a 4-digit passcode to open the app',
+                  value: _hasPasscode,
+                  onChanged: _togglePasscode,
+                ),
+                if (_hasPasscode) ...[
+                  _SettingsTapRow(
+                    scale: scale,
+                    title: 'Change passcode',
+                    onTap: _changePasscode,
+                  ),
+                  if (_biometricAvailable)
+                    _SettingsSwitchRow(
+                      scale: scale,
+                      title: 'Use Face ID / fingerprint',
+                      subtitle: 'Unlock with biometrics instead of typing the passcode',
+                      value: _biometricEnabled,
+                      onChanged: _toggleBiometric,
+                    ),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
+// A settings row with a title/subtitle and a toggle. Built from scratch
+// instead of SwitchListTile so the Switch itself -- not just its text --
+// can grow via Transform.scale on tablets; SwitchListTile doesn't expose
+// its internal Switch for that.
+class _SettingsSwitchRow extends StatelessWidget {
+  final double scale;
+  final String title;
+  final String subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _SettingsSwitchRow({
+    required this.scale,
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return InkWell(
+      onTap: () => onChanged(!value),
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 12 * scale),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: TextStyle(color: colors.ink, fontWeight: FontWeight.w600, fontSize: 16 * scale)),
+                  SizedBox(height: 4 * scale),
+                  Text(
+                    subtitle,
+                    style: TextStyle(color: colors.ink.withValues(alpha: 0.55), fontSize: 13 * scale),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(width: 12 * scale),
+            Transform.scale(
+              scale: scale,
+              child: Switch(
+                activeThumbColor: kAccent,
+                value: value,
+                onChanged: onChanged,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// A tappable settings row (no toggle) -- e.g. "Change passcode".
+class _SettingsTapRow extends StatelessWidget {
+  final double scale;
+  final String title;
+  final VoidCallback onTap;
+
+  const _SettingsTapRow({required this.scale, required this.title, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(title, style: TextStyle(color: colors.ink, fontSize: 16 * scale)),
+            ),
+            Icon(Icons.chevron_right, size: 24 * scale, color: colors.ink.withValues(alpha: 0.4)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1031,12 +1739,12 @@ class ResetConfirmation {
       actions: (dialogContext) => [
         TextButton(
           onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text("No"),
+          child: Text("No", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
         ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
           onPressed: () => Navigator.pop(dialogContext, false),
-          child: const Text("Yes, keep going"),
+          child: Text("Yes, keep going", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
         ),
       ],
     );
@@ -1055,7 +1763,7 @@ class ResetConfirmation {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text("Got it"),
+            child: Text("Got it", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
           ),
         ],
       );
@@ -1069,12 +1777,12 @@ class ResetConfirmation {
       actions: (dialogContext) => [
         TextButton(
           onPressed: () => Navigator.pop(dialogContext, false),
-          child: const Text("Cancel"),
+          child: Text("Cancel", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
         ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
           onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text("Reset"),
+          child: Text("Reset", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
         ),
       ],
     );
@@ -1093,13 +1801,61 @@ class ResetConfirmation {
       // translucent background that reads as the whole screen going dark.
       // A lighter barrier keeps the dim-behind-the-dialog effect subtle.
       barrierColor: Colors.black.withValues(alpha: 0.3),
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: AppColors.of(dialogContext).dialogBg,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text(title, style: dialogTitleStyle(dialogContext)),
-        content: Text(body, style: dialogBodyStyle(dialogContext)),
-        actions: actions(dialogContext),
-      ),
+      builder: (dialogContext) {
+        final scale = tabletScale(dialogContext);
+        // Built from a plain Dialog + Column instead of AlertDialog's
+        // title/content/actions slots -- those slots go through an
+        // OverflowBar + Flexible/ScrollView combo that (confirmed by
+        // testing every combination of titlePadding/contentPadding/
+        // actionsPadding/insetPadding, and even plain nested Padding
+        // widgets) renders the actions row past the dialog's own
+        // background on this Flutter version once the dialog gets tall
+        // enough. A bare Column has no such special-cased internals, so
+        // it just sizes to its content like every other Column in this
+        // app (see the bottom sheets).
+        final actionWidgets = actions(dialogContext);
+        return Theme(
+          data: Theme.of(dialogContext).copyWith(
+            elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                padding: EdgeInsets.symmetric(horizontal: 24 * scale, vertical: 14 * scale),
+              ),
+            ),
+            textButtonTheme: TextButtonThemeData(
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
+              ),
+            ),
+          ),
+          child: Dialog(
+            backgroundColor: AppColors.of(dialogContext).dialogBg,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            insetPadding: EdgeInsets.symmetric(horizontal: 24 * scale, vertical: 24 * scale),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(24 * scale, 24 * scale, 24 * scale, 8 * scale),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: dialogTitleStyle(dialogContext)),
+                  SizedBox(height: 12 * scale),
+                  Text(body, style: dialogBodyStyle(dialogContext)),
+                  SizedBox(height: 20 * scale),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      for (int i = 0; i < actionWidgets.length; i++) ...[
+                        if (i > 0) SizedBox(width: 8 * scale),
+                        actionWidgets[i],
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1270,6 +2026,11 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      // Material 3's default bottom-sheet theme caps width at 640 and
+      // centers it on wide viewports -- fine on phones (narrower anyway)
+      // but leaves dead space on either side on tablets. Overriding with an
+      // unbounded max width keeps it edge-to-edge on every screen size.
+      constraints: const BoxConstraints(maxWidth: double.infinity),
       builder: (context) => _AddHabitSheet(),
     );
     if (created != null) {
@@ -1358,16 +2119,18 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return Scaffold(
       backgroundColor: colors.bg,
       appBar: AppBar(
         backgroundColor: colors.bg,
         elevation: 0,
         titleSpacing: 24,
+        toolbarHeight: kToolbarHeight * scale,
         title: Text(
           "nope.",
           style: TextStyle(
-            fontSize: 28,
+            fontSize: 28 * scale,
             fontWeight: FontWeight.w900,
             color: colors.ink,
             letterSpacing: -1.5,
@@ -1381,6 +2144,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
               tooltip: mode == ThemeMode.dark ? "Switch to light mode" : "Switch to dark mode",
               icon: Icon(
                 mode == ThemeMode.dark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                size: 30 * scale,
                 color: colors.ink.withValues(alpha: 0.54),
               ),
               onPressed: () {
@@ -1392,7 +2156,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
           if (habits.isNotEmpty)
             IconButton(
               tooltip: "Calendar view",
-              icon: Icon(Icons.calendar_month_outlined, color: colors.ink.withValues(alpha: 0.54)),
+              icon: Icon(Icons.calendar_month_outlined, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => CalendarView(habits: habits)),
@@ -1401,7 +2165,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
           if (habits.isNotEmpty)
             IconButton(
               tooltip: "Reset all streaks",
-              icon: Icon(Icons.restart_alt, color: colors.ink.withValues(alpha: 0.54)),
+              icon: Icon(Icons.restart_alt, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
               onPressed: () async {
                 final confirmed = await ResetConfirmation.confirm(
                   context,
@@ -1422,8 +2186,16 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
             ),
           IconButton(
             tooltip: "Add habit",
-            icon: Icon(Icons.add_rounded, color: colors.ink),
+            icon: Icon(Icons.add_rounded, size: 30 * scale, color: colors.ink),
             onPressed: _addHabit,
+          ),
+          IconButton(
+            tooltip: "Settings",
+            icon: Icon(Icons.settings_outlined, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
           ),
           const SizedBox(width: 8),
         ],
@@ -1449,7 +2221,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
                   _RiskBanner(count: _habitsAtRiskCount()),
                 Expanded(
                   child: ListView.builder(
-              padding: const EdgeInsets.only(top: 8, bottom: 24, left: 16, right: 16),
+              padding: EdgeInsets.only(top: isTablet(context) ? 32 : 8, bottom: 24, left: 16, right: 16),
               itemCount: habits.length,
               itemBuilder: (context, i) {
                 final h = habits[i];
@@ -1504,26 +2276,46 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
               ],
             ),
           ),
+          // Multiple emitters (one per Align position) each looked up their
+          // own screen position via findRenderObject() at the instant
+          // play() fired -- that lookup could lose the race against layout
+          // and fall back to Offset.zero, dumping every particle in the
+          // top-left corner instead of across the top edge. A single
+          // emitter avoids that race entirely (nothing to desync), so scale
+          // its blast force to the screen width instead of adding more
+          // emitters -- that's what actually reaches the edges on a wide
+          // landscape/tablet screen.
           Positioned.fill(
             child: IgnorePointer(
               child: Align(
                 alignment: Alignment.topCenter,
-                child: ConfettiWidget(
-                  confettiController: _confettiController,
-                  blastDirectionality: BlastDirectionality.explosive,
-                  shouldLoop: false,
-                  maxBlastForce: 25,
-                  minBlastForce: 8,
-                  emissionFrequency: 0.04,
-                  numberOfParticles: 18,
-                  gravity: 0.35,
-                  colors: [
-                    colors.ink,
-                    kAccent,
-                    const Color(0xFFD7546C),
-                    const Color(0xFF547B66),
-                    const Color(0xFFB6A02B),
-                  ],
+                child: Builder(
+                  builder: (context) {
+                    final screenWidth = MediaQuery.of(context).size.width;
+                    // Blast distance doesn't scale linearly with force --
+                    // drag makes it fall off, so a screen-width-proportional
+                    // force undershoots badly on wide tablets (measured:
+                    // 3.66x force only reached ~55% of the way to the edge
+                    // on a 1464dp-wide screen). Scale more aggressively.
+                    final forceScale = (screenWidth / 160).clamp(1.0, 14.0);
+                    return ConfettiWidget(
+                      confettiController: _confettiController,
+                      blastDirectionality: BlastDirectionality.explosive,
+                      shouldLoop: false,
+                      maxBlastForce: 25 * forceScale,
+                      minBlastForce: 8 * forceScale,
+                      emissionFrequency: 0.04,
+                      numberOfParticles: 18,
+                      gravity: 0.35,
+                      colors: [
+                        colors.ink,
+                        kAccent,
+                        const Color(0xFFD7546C),
+                        const Color(0xFF547B66),
+                        const Color(0xFFB6A02B),
+                      ],
+                    );
+                  },
                 ),
               ),
             ),
@@ -1651,16 +2443,22 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return Container(
+      // Capped below the full screen height (rather than sizing purely to
+      // content) so on shorter devices the sheet scrolls instead of its
+      // Column overflowing past the bottom of the screen.
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
       decoration: BoxDecoration(
         color: colors.card,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
         border: Border.all(color: colors.ink.withValues(alpha: 0.06)),
       ),
       padding: EdgeInsets.fromLTRB(
-        22, 14, 22, MediaQuery.of(context).viewInsets.bottom + 28,
+        22 * scale, 14 * scale, 22 * scale, MediaQuery.of(context).viewInsets.bottom + 28 * scale,
       ),
-      child: Column(
+      child: SingleChildScrollView(
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1669,8 +2467,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Container(
-                width: 36,
-                height: 4,
+                width: 36 * scale,
+                height: 4 * scale,
                 decoration: BoxDecoration(
                   color: colors.ink.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(2),
@@ -1678,12 +2476,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               ),
             ],
           ),
-          const SizedBox(height: 22),
+          SizedBox(height: 22 * scale),
 
           // Live preview row
           AnimatedContainer(
             duration: const Duration(milliseconds: 250),
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.all(16 * scale),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
@@ -1698,8 +2496,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             ),
             child: Row(
               children: [
-                Icon(selectedIcon, color: selectedColor, size: 44),
-                const SizedBox(width: 14),
+                Icon(selectedIcon, color: selectedColor, size: 44 * scale),
+                SizedBox(width: 14 * scale),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1707,16 +2505,16 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       Text(
                         nameCtrl.text.trim().isEmpty ? "New habit" : nameCtrl.text.trim(),
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 19,
+                        style: TextStyle(
+                          fontSize: 19 * scale,
                           fontWeight: FontWeight.w800,
                           letterSpacing: -0.5,
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      SizedBox(height: 2 * scale),
                       Text(
                         "Starting streak: $streak day${streak == 1 ? '' : 's'}",
-                        style: TextStyle(fontSize: 12.5, color: colors.ink.withValues(alpha: 0.54), fontWeight: FontWeight.w500),
+                        style: TextStyle(fontSize: 12.5 * scale, color: colors.ink.withValues(alpha: 0.54), fontWeight: FontWeight.w500),
                       ),
                     ],
                   ),
@@ -1725,27 +2523,27 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             ),
           ),
 
-          const SizedBox(height: 24),
+          SizedBox(height: 24 * scale),
           Text(
             "NAME",
-            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5 * scale, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8 * scale),
           _StyledTextField(
             controller: nameCtrl,
-            hint: "e.g. smoking, junk food, social media, etc.",
+            hint: "e.g. junk food, social media, sleeping in, etc.",
             icon: Icons.edit_rounded,
             onChanged: () => setState(() {}),
           ),
 
-          const SizedBox(height: 22),
+          SizedBox(height: 22 * scale),
           Text(
             "STARTING STREAK",
-            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5 * scale, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8 * scale),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            padding: EdgeInsets.symmetric(horizontal: 6 * scale, vertical: 6 * scale),
             decoration: BoxDecoration(
               color: colors.ink.withValues(alpha: 0.05),
               borderRadius: BorderRadius.circular(14),
@@ -1764,7 +2562,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       textAlign: TextAlign.center,
                       keyboardType: TextInputType.number,
                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                      style: TextStyle(fontSize: 18 * scale, fontWeight: FontWeight.w800, letterSpacing: -0.5),
                       decoration: const InputDecoration(
                         border: InputBorder.none,
                         isDense: true,
@@ -1782,12 +2580,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             ),
           ),
 
-          const SizedBox(height: 22),
+          SizedBox(height: 22 * scale),
           Text(
             "COLOR",
-            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5 * scale, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: 10 * scale),
           Row(
             children: [
               ...presetColors.entries.map((entry) {
@@ -1799,11 +2597,11 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       setState(() => selectedColor = entry.value);
                     },
                     child: Padding(
-                      padding: const EdgeInsets.only(right: 8),
+                      padding: EdgeInsets.only(right: 8 * scale),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
                         curve: Curves.easeOut,
-                        height: 52,
+                        height: 52 * scale,
                         decoration: BoxDecoration(
                           color: entry.value.withValues(alpha: isSelected ? 0.22 : 0.08),
                           borderRadius: BorderRadius.circular(14),
@@ -1817,8 +2615,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                             duration: const Duration(milliseconds: 200),
                             scale: isSelected ? 1.0 : 0.85,
                             child: Container(
-                              width: 18,
-                              height: 18,
+                              width: 18 * scale,
+                              height: 18 * scale,
                               decoration: BoxDecoration(
                                 color: entry.value,
                                 shape: BoxShape.circle,
@@ -1827,7 +2625,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                                     : [],
                               ),
                               child: isSelected
-                                  ? const Icon(Icons.check, color: Colors.white, size: 12)
+                                  ? Icon(Icons.check, color: Colors.white, size: 12 * scale)
                                   : null,
                             ),
                           ),
@@ -1841,6 +2639,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                 current: selectedColor,
                 isCustom: !_isPresetColor(selectedColor),
                 ink: colors.ink,
+                scale: scale,
                 onTap: () async {
                   final picked = await _pickCustomColor(context, selectedColor);
                   if (picked != null) {
@@ -1852,15 +2651,15 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             ],
           ),
 
-          const SizedBox(height: 22),
+          SizedBox(height: 22 * scale),
           Text(
             "ICON",
-            style: TextStyle(fontSize: 11.5, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
+            style: TextStyle(fontSize: 11.5 * scale, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: 10 * scale),
           Wrap(
-            spacing: 10,
-            runSpacing: 10,
+            spacing: 10 * scale,
+            runSpacing: 10 * scale,
             children: presetIcons.map((icon) {
               final isSelected = icon.codePoint == selectedIcon.codePoint;
               return GestureDetector(
@@ -1871,8 +2670,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   curve: Curves.easeOut,
-                  width: 44,
-                  height: 44,
+                  width: 44 * scale,
+                  height: 44 * scale,
                   decoration: BoxDecoration(
                     color: isSelected ? selectedColor : colors.ink.withValues(alpha: 0.06),
                     shape: BoxShape.circle,
@@ -1884,20 +2683,20 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                         ? [BoxShadow(color: selectedColor.withValues(alpha: 0.45), blurRadius: 10)]
                         : [],
                   ),
-                  child: Icon(icon, size: 20, color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.54)),
+                  child: Icon(icon, size: 20 * scale, color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.54)),
                 ),
               );
             }).toList(),
           ),
 
-          const SizedBox(height: 28),
+          SizedBox(height: 28 * scale),
           Row(
             children: [
               Expanded(
                 child: _PressableButton(
                   onTap: () => Navigator.pop(context),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 17),
+                    padding: EdgeInsets.symmetric(vertical: 17 * scale),
                     decoration: BoxDecoration(
                       color: colors.ink.withValues(alpha: 0.06),
                       borderRadius: BorderRadius.circular(16),
@@ -1905,19 +2704,19 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                     child: Center(
                       child: Text(
                         "Cancel",
-                        style: TextStyle(color: colors.ink.withValues(alpha: 0.6), fontSize: 15, fontWeight: FontWeight.w700),
+                        style: TextStyle(color: colors.ink.withValues(alpha: 0.6), fontSize: 15 * scale, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: 12 * scale),
               Expanded(
                 flex: 2,
                 child: _PressableButton(
                   onTap: _submit,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 17),
+                    padding: EdgeInsets.symmetric(vertical: 17 * scale),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
                         colors: [selectedColor, selectedColor.withValues(alpha: 0.7)],
@@ -1929,12 +2728,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                         BoxShadow(color: selectedColor.withValues(alpha: 0.35), blurRadius: 16, offset: const Offset(0, 6)),
                       ],
                     ),
-                    child: const Center(
+                    child: Center(
                       child: Text(
                         "Add Habit",
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 15.5,
+                          fontSize: 15.5 * scale,
                           fontWeight: FontWeight.w800,
                           letterSpacing: -0.2,
                         ),
@@ -1946,6 +2745,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             ],
           ),
         ],
+        ),
       ),
     );
   }
@@ -1960,16 +2760,17 @@ class _StepperButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onTap != null;
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 44,
-        height: 44,
+        width: 44 * scale,
+        height: 44 * scale,
         decoration: BoxDecoration(
           color: colors.ink.withValues(alpha: enabled ? 0.08 : 0.02),
           borderRadius: BorderRadius.circular(10),
         ),
-        child: Icon(icon, size: 18, color: enabled ? colors.ink : colors.ink.withValues(alpha: 0.24)),
+        child: Icon(icon, size: 18 * scale, color: enabled ? colors.ink : colors.ink.withValues(alpha: 0.24)),
       ),
     );
   }
@@ -1995,15 +2796,16 @@ class _StyledTextField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
       onChanged: onChanged == null ? null : (_) => onChanged!(),
-      style: TextStyle(color: colors.ink, fontSize: 16, fontWeight: FontWeight.w600),
+      style: TextStyle(color: colors.ink, fontSize: 16 * scale, fontWeight: FontWeight.w600),
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
-        prefixIcon: icon == null ? null : Icon(icon, size: 19, color: colors.ink.withValues(alpha: 0.38)),
+        prefixIcon: icon == null ? null : Icon(icon, size: 19 * scale, color: colors.ink.withValues(alpha: 0.38)),
         labelStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38)),
         hintStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontWeight: FontWeight.w500),
         enabledBorder: OutlineInputBorder(
@@ -2014,7 +2816,7 @@ class _StyledTextField extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(color: kAccent),
         ),
-        contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+        contentPadding: EdgeInsets.symmetric(vertical: 16 * scale, horizontal: 16 * scale),
         filled: true,
         fillColor: colors.ink.withValues(alpha: 0.05),
       ),
@@ -2102,6 +2904,7 @@ class _HabitCardState extends State<_HabitCard> {
   Widget _buildCard(BuildContext context) {
     final colors = AppColors.of(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final scale = tabletScale(context);
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
 
@@ -2139,53 +2942,60 @@ class _HabitCardState extends State<_HabitCard> {
         ],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
+        padding: EdgeInsets.fromLTRB(20 * scale, 18 * scale, 16 * scale, 18 * scale),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header row -- icon + name centered as a block; reset button
-            // pinned to the right, balanced by an equal-width spacer on the
-            // left so the centered block is actually centered, not just
-            // centered-minus-button-width.
-            Row(
+            // Header row -- icon + name centered on the *full* card width via
+            // Stack, with the reset button floating on top at the right.
+            // (Previously centered via a Row with a spacer sized to match
+            // the reset button, which drifted off-center once the button's
+            // own icon started scaling for tablets at a different rate than
+            // the fixed-width spacer.)
+            SizedBox(
+              width: double.infinity,
+              child: Stack(
+              alignment: Alignment.center,
               children: [
-                const SizedBox(width: 36),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () => _showCustomizeSheet(context),
-                    child: Column(
-                      children: [
-                        Icon(
-                          habitIconForCodePoint(habit.iconCodePoint),
-                          size: 84,
-                          color: habitColor,
+                GestureDetector(
+                  onTap: () => _showCustomizeSheet(context),
+                  child: Column(
+                    children: [
+                      Icon(
+                        habitIconForCodePoint(habit.iconCodePoint),
+                        size: 100 * scale,
+                        color: habitColor,
+                      ),
+                      SizedBox(height: 8 * scale),
+                      Text(
+                        habit.name,
+                        textAlign: TextAlign.center,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 15 * scale,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3,
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          habit.name,
-                          textAlign: TextAlign.center,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.3,
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
-                IconButton(
-                  tooltip: "Reset streak",
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                  onPressed: onReset,
-                  icon: Icon(Icons.refresh, size: 20, color: colors.ink.withValues(alpha: 0.38)),
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: IconButton(
+                    tooltip: "Reset streak",
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    onPressed: onReset,
+                    icon: Icon(Icons.refresh, size: 20 * scale, color: colors.ink.withValues(alpha: 0.38)),
+                  ),
                 ),
               ],
+              ),
             ),
 
-            const SizedBox(height: 4),
+            SizedBox(height: 4 * scale),
 
             // Streak info
             Row(
@@ -2219,7 +3029,7 @@ class _HabitCardState extends State<_HabitCard> {
                   Expanded(
                     child: Text(
                       "last: ${_formatDate(habit.lastTap!)}",
-                      style: TextStyle(fontSize: 11, color: colors.ink.withValues(alpha: 0.3)),
+                      style: TextStyle(fontSize: 11 * scale, color: colors.ink.withValues(alpha: 0.3)),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -2227,7 +3037,7 @@ class _HabitCardState extends State<_HabitCard> {
               ],
             ),
 
-            const SizedBox(height: 18),
+            SizedBox(height: 18 * scale),
             // NOPE Button
             Center(
               child: _NopeButton(
@@ -2239,7 +3049,7 @@ class _HabitCardState extends State<_HabitCard> {
 
             // Adaptive message
             if (habit.lastLine != null) ...[
-              const SizedBox(height: 14),
+              SizedBox(height: 14 * scale),
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 child: Text(
@@ -2247,7 +3057,7 @@ class _HabitCardState extends State<_HabitCard> {
                   key: ValueKey(habit.lastLine),
                   style: TextStyle(
                     color: tappedToday ? habitColor.withValues(alpha: 0.8) : colors.ink.withValues(alpha: 0.54),
-                    fontSize: 14,
+                    fontSize: 14 * scale,
                     fontStyle: FontStyle.italic,
                   ),
                 ),
@@ -2384,8 +3194,9 @@ class _StatChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: EdgeInsets.symmetric(horizontal: 10 * scale, vertical: 5 * scale),
       decoration: BoxDecoration(
         color: highlight ? color.withValues(alpha: 0.12) : colors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
@@ -2396,7 +3207,7 @@ class _StatChip extends StatelessWidget {
           Text(
             value,
             style: TextStyle(
-              fontSize: 14,
+              fontSize: 14 * scale,
               fontWeight: FontWeight.w800,
               color: highlight ? color : colors.ink.withValues(alpha: 0.54),
               letterSpacing: -0.5,
@@ -2406,7 +3217,7 @@ class _StatChip extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              fontSize: 11,
+              fontSize: 11 * scale,
               color: highlight ? color.withValues(alpha: 0.7) : colors.ink.withValues(alpha: 0.3),
             ),
           ),
@@ -2444,6 +3255,7 @@ class _NopeButtonState extends State<_NopeButton> {
     final bg = widget.tappedToday
         ? widget.color.withValues(alpha: 0.12)
         : colors.raised;
+    final scale = tabletScale(context);
 
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
@@ -2464,8 +3276,8 @@ class _NopeButtonState extends State<_NopeButton> {
           // (matching the AnimatedScale above) lets it actually register.
           duration: const Duration(milliseconds: 90),
           curve: Curves.easeOut,
-          width: 130,
-          height: 130,
+          width: 160 * scale,
+          height: 160 * scale,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             // A flat single-color fill with a thin border read as a plain
@@ -2509,7 +3321,7 @@ class _NopeButtonState extends State<_NopeButton> {
             child: AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 300),
               style: TextStyle(
-                fontSize: 22,
+                fontSize: 22 * scale,
                 fontWeight: FontWeight.w900,
                 color: color,
                 letterSpacing: 3,
@@ -2605,14 +3417,17 @@ class _CalendarViewState extends State<CalendarView> {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final scale = tabletScale(context);
     return Scaffold(
       backgroundColor: colors.bg,
       appBar: AppBar(
         backgroundColor: colors.bg,
         elevation: 0,
-        title: const Text(
+        toolbarHeight: kToolbarHeight * scale,
+        iconTheme: IconThemeData(size: 24 * scale),
+        title: Text(
           "Calendar",
-          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -0.5),
+          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -0.5, fontSize: 20 * scale),
         ),
       ),
       body: SingleChildScrollView(
@@ -2623,6 +3438,8 @@ class _CalendarViewState extends State<CalendarView> {
             lastDay: DateTime.now().add(const Duration(days: 365)),
             focusedDay: _focusedDay,
             calendarFormat: CalendarFormat.month,
+            rowHeight: 52 * scale,
+            daysOfWeekHeight: 24 * scale,
             selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
             onDaySelected: (selected, focused) {
               setState(() {
@@ -2631,9 +3448,9 @@ class _CalendarViewState extends State<CalendarView> {
               });
             },
             calendarStyle: CalendarStyle(
-              defaultTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.7)),
-              weekendTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.54)),
-              outsideTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24)),
+              defaultTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.7), fontSize: 14 * scale),
+              weekendTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.54), fontSize: 14 * scale),
+              outsideTextStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontSize: 14 * scale),
               todayDecoration: BoxDecoration(
                 color: kAccent.withValues(alpha: 0.35),
                 shape: BoxShape.circle,
@@ -2642,23 +3459,23 @@ class _CalendarViewState extends State<CalendarView> {
                 color: kAccent,
                 shape: BoxShape.circle,
               ),
-              selectedTextStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
-              todayTextStyle: TextStyle(color: colors.ink, fontWeight: FontWeight.w600),
+              selectedTextStyle: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14 * scale),
+              todayTextStyle: TextStyle(color: colors.ink, fontWeight: FontWeight.w600, fontSize: 14 * scale),
             ),
             headerStyle: HeaderStyle(
               formatButtonVisible: false,
               titleCentered: true,
-              titleTextStyle: const TextStyle(
+              titleTextStyle: TextStyle(
                 fontWeight: FontWeight.w800,
-                fontSize: 16,
+                fontSize: 16 * scale,
                 letterSpacing: -0.5,
               ),
-              leftChevronIcon: Icon(Icons.chevron_left, color: colors.ink.withValues(alpha: 0.54)),
-              rightChevronIcon: Icon(Icons.chevron_right, color: colors.ink.withValues(alpha: 0.54)),
+              leftChevronIcon: Icon(Icons.chevron_left, size: 24 * scale, color: colors.ink.withValues(alpha: 0.54)),
+              rightChevronIcon: Icon(Icons.chevron_right, size: 24 * scale, color: colors.ink.withValues(alpha: 0.54)),
             ),
             daysOfWeekStyle: DaysOfWeekStyle(
-              weekdayStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38), fontSize: 12),
-              weekendStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontSize: 12),
+              weekdayStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38), fontSize: 12 * scale),
+              weekendStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontSize: 12 * scale),
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, _) {
@@ -2711,9 +3528,9 @@ class _CalendarViewState extends State<CalendarView> {
                       children: [
                         Text(
                           "Resisted on ${_selectedDay!.month}/${_selectedDay!.day}/${_selectedDay!.year}",
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontWeight: FontWeight.w800,
-                            fontSize: 16,
+                            fontSize: 16 * scale,
                             letterSpacing: -0.3,
                           ),
                         ),
@@ -2723,8 +3540,8 @@ class _CalendarViewState extends State<CalendarView> {
                           child: Row(
                             children: [
                               Container(
-                                width: 10,
-                                height: 10,
+                                width: 10 * scale,
+                                height: 10 * scale,
                                 margin: const EdgeInsets.only(right: 10),
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
@@ -2735,18 +3552,18 @@ class _CalendarViewState extends State<CalendarView> {
                                 child: Text(
                                   entry.key.name,
                                   overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(color: colors.ink.withValues(alpha: 0.7)),
+                                  style: TextStyle(color: colors.ink.withValues(alpha: 0.7), fontSize: 14 * scale),
                                 ),
                               ),
                               Text(
                                 _formatTime(entry.value),
-                                style: TextStyle(fontSize: 12, color: colors.ink.withValues(alpha: 0.4)),
+                                style: TextStyle(fontSize: 12 * scale, color: colors.ink.withValues(alpha: 0.4)),
                               ),
                             ],
                           ),
                         )),
                         if (onDay.isEmpty)
-                          Text("Nothing logged.", style: TextStyle(color: colors.ink.withValues(alpha: 0.38))),
+                          Text("Nothing logged.", style: TextStyle(color: colors.ink.withValues(alpha: 0.38), fontSize: 14 * scale)),
                       ],
                     );
                   }),
