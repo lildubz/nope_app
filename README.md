@@ -5,7 +5,6 @@ A cross-platform mobile habit-tracking app (currently in beta) designed to help 
 ## Key Features
 
 - **Daily Habit Tracking:** Tap "NOPE" once per day per habit to increment streaks and log progress.
-- **Adaptive Motivational Messages:** Dynamic feedback messages adjust based on the habit’s streak length, with multiple tone packs (Light, Dark, Dry, Savage) for different user personalities.
 - **Streak Management:** Tracks current streak, longest streak, and automatically resets streaks if a day is missed.
 - **Custom Habit Colors:** Users can assign colors to habits and change them anytime using a circular color selector.
 - **Calendar View:** Visualize habit performance over time with markers indicating resisted urges.
