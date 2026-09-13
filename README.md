@@ -38,3 +38,7 @@ Currently in beta testing. Demo and source code available upon request.
 
 ### Calendar Overview
 ![](SCR-20250828-sggi.png)
+
+## License
+
+All rights reserved. Shared for portfolio and demonstration purposes only — no permission is granted to use, copy, modify, or distribute this code.
