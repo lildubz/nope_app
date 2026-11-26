@@ -1,0 +1,17 @@
+# Scenario: adding a habit.
+# Captures the "New habit" sheet mid-fill (name typed, streak set) --
+# good for showing how simple setup is -- then the resulting card on Home.
+appId: com.example.nopeApp
+---
+- launchApp:
+    clearState: true
+- tapOn: "let's go →"
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "no coffee"
+- tapOn: "0"
+- eraseText
+- inputText: "14"
+- takeScreenshot: 02_add_habit_sheet
+- tapOn: "Add Habit"
+- takeScreenshot: 02_habit_added_home

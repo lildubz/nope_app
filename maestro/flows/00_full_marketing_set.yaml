@@ -1,0 +1,10 @@
+# Runs every marketing scenario back to back in one command. Re-run this
+# any time the UI changes to refresh the whole screenshot set at once:
+#   maestro test maestro/flows/00_full_marketing_set.yaml
+appId: com.example.nopeApp
+---
+- runFlow: 01_onboarding.yaml
+- runFlow: 02_add_habit_flow.yaml
+- runFlow: 03_home_hero.yaml
+- runFlow: 04_calendar_view.yaml
+- runFlow: 05_nope_celebration.yaml

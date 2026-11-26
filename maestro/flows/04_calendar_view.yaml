@@ -1,0 +1,12 @@
+# Scenario: progress/history view.
+# Seeds habits, then opens the monthly calendar -- good for "track your
+# progress" / consistency messaging.
+appId: com.example.nopeApp
+---
+- launchApp:
+    clearState: true
+- tapOn: "let's go →"
+- runFlow: ../subflows/seed_habits.yaml
+- tapOn: "Calendar view"
+- takeScreenshot: 04_calendar_view
+- back

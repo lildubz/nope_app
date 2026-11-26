@@ -1,0 +1,13 @@
+# Scenario: the hero shot.
+# Seeds 4 habits with strong, believable streaks, then captures the full
+# Home list in both light and dark mode -- the main marketing image.
+appId: com.example.nopeApp
+---
+- launchApp:
+    clearState: true
+- tapOn: "let's go →"
+- runFlow: ../subflows/seed_habits.yaml
+- takeScreenshot: 03_home_hero_light
+- tapOn: "Switch to dark mode"
+- takeScreenshot: 03_home_hero_dark
+- tapOn: "Switch to light mode"

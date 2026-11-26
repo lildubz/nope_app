@@ -1,0 +1,18 @@
+# Scenario: the celebratory moment.
+# Adds one habit, then taps NOPE for today to trigger the confetti burst
+# and adaptive motivational line -- a good "delight" shot for marketing.
+appId: com.example.nopeApp
+---
+- launchApp:
+    clearState: true
+- tapOn: "let's go →"
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "no coffee"
+- tapOn: "0"
+- eraseText
+- inputText: "6"
+- tapOn: "Add Habit"
+- tapOn: "NOPE."
+# Screenshot immediately -- confetti/adaptive message are already showing.
+- takeScreenshot: 05_nope_celebration

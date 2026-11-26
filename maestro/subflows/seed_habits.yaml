@@ -1,0 +1,36 @@
+# Reusable subflow: adds 4 demo habits with realistic, camera-ready streaks.
+# Assumes the app is already on the Home screen (intro completed).
+# Called via `runFlow: subflows/seed_habits.yaml` from other flows.
+appId: com.example.nopeApp
+---
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "no coffee"
+- tapOn: "0"
+- eraseText
+- inputText: "47"
+- tapOn: "Add Habit"
+
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "doomscrolling"
+- tapOn: "0"
+- eraseText
+- inputText: "63"
+- tapOn: "Add Habit"
+
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "junk food"
+- tapOn: "0"
+- eraseText
+- inputText: "12"
+- tapOn: "Add Habit"
+
+- tapOn: "Add habit"
+- tapOn: "e.g. junk food.*"
+- inputText: "late night snacks"
+- tapOn: "0"
+- eraseText
+- inputText: "5"
+- tapOn: "Add Habit"

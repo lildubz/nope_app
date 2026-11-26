@@ -1,0 +1,14 @@
+# Scenario: first-launch onboarding.
+# Captures the intro screen (title, tagline, feature bullets, CTA) and the
+# empty home state right after completing it -- good for "how it starts"
+# marketing shots and App Store screenshot #1.
+appId: com.example.nopeApp
+---
+- launchApp:
+    clearState: true
+# LoadingScreen's logo animation plays for ~3.2s before intro appears;
+# tapOn below waits for it automatically, no manual wait needed.
+- assertVisible: "nope."
+- takeScreenshot: 01_intro_screen
+- tapOn: "let's go →"
+- takeScreenshot: 01_empty_home
