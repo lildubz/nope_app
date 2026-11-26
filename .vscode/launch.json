@@ -1,7 +1,4 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
@@ -22,24 +19,41 @@
             "flutterMode": "release"
         },
         {
-            "name": "shared_preferences_foundation",
-            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
-            "request": "launch",
-            "type": "dart"
-        },
-        {
-            "name": "shared_preferences_foundation (profile mode)",
-            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
+            // Runs the app as a local web server. Once Flutter prints the
+            // URL, serverReadyAction triggers the hidden helper config below,
+            // which opens it in VS Code's integrated browser (beside the
+            // editor). suppressWebServerDeviceBrowserLaunch stops the Dart
+            // extension also opening it in the system default browser.
+            "name": "nope_app (preview in VS Code)",
             "request": "launch",
             "type": "dart",
-            "flutterMode": "profile"
+            "deviceId": "web-server",
+            "args": ["--web-port", "8686"],
+            "suppressWebServerDeviceBrowserLaunch": true,
+            "serverReadyAction": {
+                "pattern": "http://localhost:8686",
+                "action": "startDebugging",
+                "name": "open preview tab",
+                "killOnServerStop": false
+            }
         },
         {
-            "name": "shared_preferences_foundation (release mode)",
-            "cwd": "ios/.symlinks/plugins/shared_preferences_foundation",
+            // Helper -- never actually launches. Resolving
+            // ${command:workbench.action.browser.open} runs VS Code's "open
+            // integrated browser" command, which receives this config and
+            // reads its url / reuseUrlFilter / openToSide fields: it opens the
+            // preview beside the editor, or reuses and reloads that tab if
+            // it's already open. The command returns nothing, and VS Code
+            // cancels a launch whose ${command:...} returns nothing.
+            // Hidden from the Run and Debug dropdown.
+            "name": "open preview tab",
             "request": "launch",
             "type": "dart",
-            "flutterMode": "release"
+            "url": "http://localhost:8686",
+            "reuseUrlFilter": "http://localhost:8686",
+            "openToSide": true,
+            "program": "${command:workbench.action.browser.open}",
+            "presentation": { "hidden": true }
         }
     ]
 }

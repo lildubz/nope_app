@@ -1,3 +1,6 @@
 {
-    "java.configuration.updateBuildConfiguration": "interactive"
+    "java.configuration.updateBuildConfiguration": "interactive",
+    // Flutter hides its "web-server" device by default, and the
+    // "preview in VS Code" launch config needs it.
+    "dart.flutterShowWebServerDevice": "always"
 }

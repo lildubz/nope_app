@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
-import 'package:confetti/confetti.dart';
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/cupertino.dart' show CupertinoSwitch;
+import 'package:device_preview/device_preview.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -14,8 +16,24 @@ import 'package:table_calendar/table_calendar.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
+import 'glass.dart';
+
 void main() {
-  runApp(const NopeApp());
+  // DevicePreview is a dev-only phone-frame simulator (device sizes, dark
+  // mode, text scaling). With enabled: false it just calls builder, so
+  // release builds pay nothing for it.
+  runApp(
+    DevicePreview(
+      enabled: !kReleaseMode,
+      // The app's own dark canvas instead of DevicePreview's default white,
+      // so the liquid-glass UI is judged against the colour it ships on.
+      backgroundColor: kGlassBaseDark,
+      // Only applies the first time -- after that DevicePreview remembers
+      // whatever device you last picked.
+      defaultDevice: Devices.ios.iPhone16Pro,
+      builder: (context) => const NopeApp(),
+    ),
+  );
   _loadThemeMode();
   _setupDailyReminder();
 }
@@ -31,6 +49,12 @@ final Map<String, Color> presetColors = {
 // App-wide accent color. Used for the FAB, calendar selection, and focused
 // inputs -- anywhere the UI needs a fixed accent rather than a per-habit color.
 const Color kAccent = Color(0xFF5490D7); // Blue
+
+// Red for reset/undo actions on done habits.
+const Color kResetRed = Color(0xFFE5484D);
+
+// App-wide typeface, bundled as an asset font (pubspec.yaml).
+const String kAppFont = 'Inter';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TABLET SCALING — this app is otherwise a fixed phone-width layout, so on a
@@ -85,7 +109,7 @@ class AppColors {
   // and popups read as slightly translucent against the scaffold instead of
   // flat opaque panels.
   static const dark = AppColors(
-    bg: Color(0xFF121212),
+    bg: kGlassBaseDark,
     card: Color(0xE6111111),
     dialogBg: Color(0xCC141414),
     raised: Color(0xFF1A1A1A),
@@ -93,7 +117,7 @@ class AppColors {
   );
 
   static const light = AppColors(
-    bg: Color(0xFFF6F6F8),
+    bg: kGlassBaseLight,
     card: Color(0xE6FFFFFF),
     dialogBg: Color(0xCCE8E8EA),
     raised: Color(0xFFEFEFF2),
@@ -114,8 +138,27 @@ ThemeData buildAppTheme(Brightness brightness) {
     // Every AlertDialog/showDialog call below sets its own backgroundColor
     // explicitly via AppColors, so we don't rely on (or risk depending on
     // a possibly-deprecated) ThemeData dialog background field here.
+    // Bundled Inter everywhere (see pubspec.yaml). Every Text/TextField
+    // inherits it through the text themes, so no TextStyle needs to name it.
+    textTheme: base.textTheme.apply(fontFamily: kAppFont),
+    primaryTextTheme: base.primaryTextTheme.apply(fontFamily: kAppFont),
     snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
-    colorScheme: base.colorScheme.copyWith(primary: kAccent, secondary: kAccent),
+    colorScheme: base.colorScheme.copyWith(primary: kAccent, secondary: kAccent, onSurface: colors.ink),
+    // Liquid glass: bars are clear so the page's GlassBackdrop shows through,
+    // and nothing tints/shadows them when content scrolls underneath.
+    appBarTheme: AppBarTheme(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      foregroundColor: colors.ink,
+    ),
+    // iOS-style push/pop (with swipe-back) on every platform, not just iOS.
+    pageTransitionsTheme: PageTransitionsTheme(
+      builders: {
+        for (final platform in TargetPlatform.values) platform: const CupertinoPageTransitionsBuilder(),
+      },
+    ),
   );
 }
 
@@ -222,7 +265,7 @@ IconData habitIconForCodePoint(int codePoint) {
 // presets. Deliberately no extra package -- three sliders is enough control
 // without pulling in a whole HSV-wheel dependency.
 Future<Color?> _pickCustomColor(BuildContext context, Color initial) {
-  return showDialog<Color>(
+  return showGlassDialog<Color>(
     context: context,
     builder: (dialogContext) {
       int r = initial.red;
@@ -231,10 +274,8 @@ Future<Color?> _pickCustomColor(BuildContext context, Color initial) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
           final current = Color.fromARGB(255, r, g, b);
-          return AlertDialog(
-            backgroundColor: AppColors.of(context).dialogBg,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            title: Text("Custom color", style: dialogTitleStyle(context)),
+          return GlassDialog(
+            title: "Custom color",
             content: SizedBox(
               width: 280,
               child: Column(
@@ -272,15 +313,8 @@ Future<Color?> _pickCustomColor(BuildContext context, Color initial) {
               ),
             ),
             actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text("Cancel"),
-              ),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: current, foregroundColor: Colors.white),
-                onPressed: () => Navigator.pop(context, current),
-                child: const Text("Select"),
-              ),
+              GlassDialogAction(label: "Cancel", onTap: () => Navigator.pop(context)),
+              GlassDialogAction(label: "Select", tint: current, onTap: () => Navigator.pop(context, current)),
             ],
           );
         },
@@ -354,39 +388,74 @@ const SweepGradient _customSwatchGradient = SweepGradient(colors: [
   Color(0xFFD7546C),
 ]);
 
-// Rounded-rect swatch matching the add-habit sheet's preset color row.
+/// A liquid-glass colour swatch tile for the add-habit sheet: glass tinted
+/// with [tint] (clear glass when null), more strongly once [selected], with
+/// a coloured outline marking the selection.
+class _GlassSwatchTile extends StatelessWidget {
+  final Color? tint;
+  final bool selected;
+  final VoidCallback onTap;
+  final Widget child;
+  final double height;
+
+  const _GlassSwatchTile({
+    required this.tint,
+    required this.selected,
+    required this.onTap,
+    required this.child,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const radius = 14.0;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+      foregroundDecoration: ShapeDecoration(
+        shape: RoundedSuperellipseBorder(
+          borderRadius: BorderRadius.circular(radius),
+          side: BorderSide(color: selected ? (tint ?? Colors.white) : Colors.transparent, width: 2),
+        ),
+      ),
+      child: GlassButton(
+        onTap: onTap,
+        shape: glassRounded(radius),
+        tint: tint,
+        tintStrength: selected ? 0.38 : 0.14,
+        // Sits on the sheet's own glass, which already blurred the page.
+        blur: 0,
+        shadows: glassControlShadow(context),
+        pressedScale: 0.93,
+        child: SizedBox(height: height, child: Center(child: child)),
+      ),
+    );
+  }
+}
+
+// The "pick any colour" tile at the end of the add-habit sheet's colour row.
 Widget _customColorCardSwatch({
   required Color current,
   required bool isCustom,
   required VoidCallback onTap,
-  required Color ink,
   double scale = 1.0,
 }) {
   return Expanded(
-    child: GestureDetector(
+    child: _GlassSwatchTile(
+      tint: isCustom ? current : null,
+      selected: isCustom,
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-        height: 52 * scale,
+      height: 52 * scale,
+      child: Container(
+        width: 18 * scale,
+        height: 18 * scale,
         decoration: BoxDecoration(
-          color: isCustom ? current.withValues(alpha: 0.22) : ink.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: isCustom ? current : Colors.transparent, width: 2),
+          shape: BoxShape.circle,
+          color: isCustom ? current : null,
+          gradient: isCustom ? null : _customSwatchGradient,
+          boxShadow: isCustom ? [BoxShadow(color: current.withValues(alpha: 0.6), blurRadius: 8)] : [],
         ),
-        child: Center(
-          child: Container(
-            width: 18 * scale,
-            height: 18 * scale,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isCustom ? current : null,
-              gradient: isCustom ? null : _customSwatchGradient,
-              boxShadow: isCustom ? [BoxShadow(color: current.withValues(alpha: 0.6), blurRadius: 8)] : [],
-            ),
-            child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 10 * scale),
-          ),
-        ),
+        child: Icon(isCustom ? Icons.check : Icons.colorize, color: Colors.white, size: 10 * scale),
       ),
     ),
   );
@@ -435,6 +504,164 @@ TextStyle dialogBodyStyle(BuildContext context) => TextStyle(
     );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GLASS CHROME — app-specific wrappers around glass.dart's primitives
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How strongly a habit's colour tints its glass. Shared by the habit card
+/// and the add-habit sheet so the sheet reads as the card being made.
+double habitGlassTint(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark ? 0.18 : 0.14;
+
+/// The small drop shadow that lifts a glass control (swatch, stepper, field)
+/// off the glass panel it sits on, so it reads as its own piece of glass.
+List<BoxShadow> glassControlShadow(BuildContext context) => [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: Theme.of(context).brightness == Brightness.dark ? 0.22 : 0.10),
+        blurRadius: 10,
+        offset: const Offset(0, 4),
+      ),
+    ];
+
+/// Every popup in the app goes through this, so the dim behind a glass
+/// dialog stays light enough for the blur to have colour to work with.
+Future<T?> showGlassDialog<T>({required BuildContext context, required WidgetBuilder builder}) {
+  return showDialog<T>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.28),
+    builder: builder,
+  );
+}
+
+/// A frosted-glass alert: bold title, scrollable body, and a row of
+/// equal-width capsule buttons along the bottom (iOS 26 alert layout).
+///
+/// Built from a plain Dialog + Column rather than AlertDialog's
+/// title/content/actions slots -- those slots go through an OverflowBar +
+/// Flexible/ScrollView combo that renders the actions past the dialog's
+/// background on this Flutter version once the dialog gets tall enough.
+class GlassDialog extends StatelessWidget {
+  final String title;
+  final Widget content;
+  final List<Widget> actions;
+
+  const GlassDialog({required this.title, required this.content, required this.actions, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = tabletScale(context);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: EdgeInsets.symmetric(horizontal: 24 * scale, vertical: 24 * scale),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 400 * scale),
+        child: Glass(
+          shape: glassRounded(32),
+          frost: 0.65,
+          blur: 30,
+          padding: EdgeInsets.fromLTRB(24 * scale, 24 * scale, 24 * scale, 20 * scale),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: dialogTitleStyle(context)),
+              SizedBox(height: 12 * scale),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: DefaultTextStyle.merge(style: dialogBodyStyle(context), child: content),
+                ),
+              ),
+              SizedBox(height: 22 * scale),
+              Row(
+                children: [
+                  for (int i = 0; i < actions.length; i++) ...[
+                    if (i > 0) SizedBox(width: 10 * scale),
+                    Expanded(child: actions[i]),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A capsule button for [GlassDialog]'s action row. Pass [tint] for the
+/// primary (filled-glass) action; leave it null for a clear-glass one.
+class GlassDialogAction extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final Color? tint;
+
+  const GlassDialogAction({required this.label, required this.onTap, this.tint, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = tabletScale(context);
+    final prominent = tint != null;
+    return GlassButton(
+      onTap: onTap,
+      tint: tint,
+      prominent: prominent,
+      // Sits on the dialog's own glass, which has already blurred the page.
+      blur: 0,
+      shadows: prominent ? null : const [],
+      padding: EdgeInsets.symmetric(horizontal: 12 * scale, vertical: 14 * scale),
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 15 * scale,
+          fontWeight: FontWeight.w700,
+          color: prominent ? Colors.white : AppColors.of(context).ink,
+        ),
+      ),
+    );
+  }
+}
+
+/// Clear navigation bar with a glass-circle back button and a centred
+/// title, the iOS 26 way. Used by every pushed screen.
+PreferredSizeWidget glassAppBar(BuildContext context, {String? title}) {
+  final colors = AppColors.of(context);
+  final scale = tabletScale(context);
+  final canPop = Navigator.of(context).canPop();
+  return AppBar(
+    automaticallyImplyLeading: false,
+    toolbarHeight: (kToolbarHeight + 8) * scale,
+    leadingWidth: 68 * scale,
+    centerTitle: true,
+    leading: canPop
+        ? Padding(
+            padding: EdgeInsets.only(left: 16 * scale),
+            child: Center(
+              child: GlassIconButton(
+                icon: Icons.arrow_back_ios_new_rounded,
+                tooltip: 'Back',
+                size: 44 * scale,
+                iconSize: 18 * scale,
+                color: colors.ink,
+                onTap: () => Navigator.of(context).maybePop(),
+              ),
+            ),
+          )
+        : null,
+    title: title == null
+        ? null
+        : Text(
+            title,
+            style: TextStyle(color: colors.ink, fontWeight: FontWeight.w700, fontSize: 17 * scale, letterSpacing: -0.3),
+          ),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // APP
 // ─────────────────────────────────────────────────────────────────────────────
 class NopeApp extends StatelessWidget {
@@ -442,11 +669,10 @@ class NopeApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 'Helvetica Neue' isn't bundled as an asset font (no `fonts:` entry in
-    // pubspec.yaml), so we deliberately don't set a custom fontFamily here --
-    // doing so used to force a slow Skia font-fallback resolution on every
-    // Text widget's first layout (worst on text-heavy screens like the intro
-    // and add-habit sheet). Platform default font avoids that.
+    // The font (kAppFont) is bundled as an asset and set in buildAppTheme.
+    // Only ever name a bundled family -- naming one that isn't bundled (as
+    // 'Helvetica Neue' once was) forces a slow font-fallback lookup on every
+    // Text widget's first layout.
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: themeModeNotifier,
       builder: (context, mode, _) {
@@ -457,21 +683,36 @@ class NopeApp extends StatelessWidget {
           darkTheme: buildAppTheme(Brightness.dark),
           home: const AppEntry(),
           debugShowCheckedModeBanner: false,
-          builder: (context, child) {
-            // Scales every Text widget app-wide on tablet-sized screens (see
-            // tabletScale) -- multiplying the *existing* scaler rather than
-            // replacing it so a user's own accessibility text-size setting
-            // still stacks on top instead of being clobbered.
-            final mq = MediaQuery.of(context);
-            if (mq.size.shortestSide < 600) return child!;
-            final scaled = mq.textScaler.scale(1.0) * 1.6;
-            return MediaQuery(
-              data: mq.copyWith(textScaler: TextScaler.linear(scaled)),
-              child: child!,
-            );
-          },
+          locale: DevicePreview.locale(context),
+          // DevicePreview's MediaQuery (the simulated device's size and text
+          // scale) goes on the outside, so the tablet scaler inside sees the
+          // previewed device rather than the desktop window.
+          builder: (context, child) => DevicePreview.appBuilder(
+            context,
+            _TabletTextScaler(child: child!),
+          ),
         );
       },
+    );
+  }
+}
+
+/// Scales every Text widget app-wide on tablet-sized screens (see
+/// tabletScale) -- multiplying the *existing* scaler rather than replacing
+/// it so a user's own accessibility text-size setting still stacks on top
+/// instead of being clobbered.
+class _TabletTextScaler extends StatelessWidget {
+  final Widget child;
+  const _TabletTextScaler({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    if (mq.size.shortestSide < 600) return child;
+    final scaled = mq.textScaler.scale(1.0) * 1.6;
+    return MediaQuery(
+      data: mq.copyWith(textScaler: TextScaler.linear(scaled)),
+      child: child,
     );
   }
 }
@@ -561,10 +802,10 @@ class _LoadingScreenState extends State<LoadingScreen>
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final wordmarkStyle = TextStyle(
-      fontSize: 120,
-      fontWeight: FontWeight.w900,
+      fontSize: 104,
+      fontWeight: FontWeight.w800,
       color: colors.ink,
-      letterSpacing: -5,
+      letterSpacing: -3,
     );
     return Scaffold(
       backgroundColor: colors.bg,
@@ -602,6 +843,16 @@ class _LoadingScreenState extends State<LoadingScreen>
               crossAxisAlignment: CrossAxisAlignment.baseline,
               textBaseline: TextBaseline.alphabetic,
               children: [
+                // Invisible twin of the "." on the right, so the word
+                // "nope" itself sits dead centre with the period hanging
+                // off to its right.
+                Visibility(
+                  visible: false,
+                  maintainSize: true,
+                  maintainAnimation: true,
+                  maintainState: true,
+                  child: Text(".", style: wordmarkStyle),
+                ),
                 ScaleTransition(
                   scale: _nopeScale,
                   child: FadeTransition(
@@ -816,8 +1067,9 @@ class _IntroScreenState extends State<IntroScreen>
   Widget build(BuildContext context) {
     final w = MediaQuery.of(context).size.width;
     final colors = AppColors.of(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
+    return GlassBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -830,7 +1082,7 @@ class _IntroScreenState extends State<IntroScreen>
           child: SingleChildScrollView(
             child: Center(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const SizedBox(height: 32),
@@ -843,9 +1095,9 @@ class _IntroScreenState extends State<IntroScreen>
                         "nope.",
                         style: TextStyle(
                           fontSize: 88,
-                          fontWeight: FontWeight.w900,
+                          fontWeight: FontWeight.w800,
                           color: colors.ink,
-                          letterSpacing: -4,
+                          letterSpacing: -2.6,
                           height: 1.0,
                         ),
                       ),
@@ -867,6 +1119,7 @@ class _IntroScreenState extends State<IntroScreen>
                     opacity: _subFade,
                     child: Text(
                       "resist the urge.\ntrack the streak.\ngrow the streak.",
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 20,
                         color: colors.ink.withValues(alpha: 0.55),
@@ -880,39 +1133,45 @@ class _IntroScreenState extends State<IntroScreen>
                   // Features
                   FadeTransition(
                     opacity: _subFade,
-                    child: const Column(
-                      children: [
-                        _IntroFeature(icon: Icons.block, text: "Hit NOPE once a day per habit"),
-                        SizedBox(height: 14),
-                        _IntroFeature(icon: Icons.local_fire_department, text: "Build streaks. Don't break the chain."),
-                        SizedBox(height: 14),
-                        _IntroFeature(icon: Icons.calendar_month, text: "See your wins on a calendar"),
-                      ],
+                    // Full width even though the column centres its children;
+                    // the feature rows inside stay left-aligned.
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: Glass(
+                        shape: glassRounded(26),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                        child: const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _IntroFeature(icon: Icons.block, text: "Hit NOPE once a day per habit"),
+                            SizedBox(height: 16),
+                            _IntroFeature(icon: Icons.local_fire_department, text: "Build streaks. Don't break the chain."),
+                            SizedBox(height: 16),
+                            _IntroFeature(icon: Icons.calendar_month, text: "See your wins on a calendar"),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 40),
-                  // CTA button -- inverted (ink bg / bg text) so it stays high
-                  // contrast in both light and dark mode.
+                  // CTA -- filled accent glass capsule.
                   FadeTransition(
                     opacity: _btnFade,
-                    child: _PressableButton(
-                      onTap: widget.onComplete,
-                      child: Container(
-                        width: double.infinity,
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: GlassButton(
+                        onTap: widget.onComplete,
+                        tint: kAccent,
+                        prominent: true,
                         padding: const EdgeInsets.symmetric(vertical: 20),
-                        decoration: BoxDecoration(
-                          color: colors.ink,
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Center(
-                          child: Text(
-                            "let's go →",
-                            style: TextStyle(
-                              color: colors.bg,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -0.3,
-                            ),
+                        child: const Text(
+                          "let's go →",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.3,
                           ),
                         ),
                       ),
@@ -924,6 +1183,7 @@ class _IntroScreenState extends State<IntroScreen>
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -939,15 +1199,17 @@ class _IntroFeature extends StatelessWidget {
     final colors = AppColors.of(context);
     return Row(
       children: [
-        Icon(icon, color: colors.ink.withValues(alpha: 0.38), size: 20),
+        Icon(icon, color: colors.ink.withValues(alpha: 0.5), size: 20),
         const SizedBox(width: 12),
-        Text(
+        Flexible(
+          child: Text(
           text,
           style: TextStyle(
-            color: colors.ink.withValues(alpha: 0.6),
+            color: colors.ink.withValues(alpha: 0.75),
             fontSize: 15,
-            fontWeight: FontWeight.w400,
+            fontWeight: FontWeight.w500,
           ),
+        ),
         ),
       ],
     );
@@ -1062,29 +1324,36 @@ class _NumericKeypad extends StatelessWidget {
         // bound by both dimensions so the keypad can never overflow it.
         final keySize = math.min(constraints.maxWidth / 3, constraints.maxHeight / 4);
 
+        // Digits are glass discs (the iOS passcode look); the backspace and
+        // biometric slots are bare icons, and an empty slot is just space.
         Widget key({String? label, IconData? icon, VoidCallback? onTap}) {
+          final Widget face;
+          if (label != null) {
+            face = GlassButton(
+              onTap: onTap,
+              shape: const CircleBorder(),
+              pressedScale: 0.92,
+              shadows: const [],
+              child: Center(
+                child: Text(
+                  label,
+                  style: TextStyle(fontSize: 28 * scale, fontWeight: FontWeight.w500, color: colors.ink),
+                ),
+              ),
+            );
+          } else if (icon != null && onTap != null) {
+            face = GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: Center(child: Icon(icon, color: colors.ink.withValues(alpha: 0.7), size: 26 * scale)),
+            );
+          } else {
+            face = const SizedBox.shrink();
+          }
           return SizedBox(
             width: keySize,
             height: keySize,
-            child: Padding(
-              padding: EdgeInsets.all(8 * scale),
-              child: Material(
-                color: Colors.transparent,
-                shape: const CircleBorder(),
-                child: InkWell(
-                  customBorder: const CircleBorder(),
-                  onTap: onTap,
-                  child: Center(
-                    child: icon != null
-                        ? Icon(icon, color: colors.ink.withValues(alpha: 0.7), size: 24 * scale)
-                        : Text(
-                            label ?? '',
-                            style: TextStyle(fontSize: 26 * scale, fontWeight: FontWeight.w600, color: colors.ink),
-                          ),
-                  ),
-                ),
-              ),
-            ),
+            child: Padding(padding: EdgeInsets.all(9 * scale), child: face),
           );
         }
 
@@ -1211,13 +1480,14 @@ class _LockScreenState extends State<LockScreen> with SingleTickerProviderStateM
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
+    return GlassBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
       body: SafeArea(
         child: Column(
           children: [
             const Spacer(),
-            Text('nope.', style: TextStyle(fontSize: 40 * scale, fontWeight: FontWeight.w900, color: colors.ink, letterSpacing: -2)),
+            Text('nope.', style: TextStyle(fontSize: 40 * scale, fontWeight: FontWeight.w800, color: colors.ink, letterSpacing: -1.2)),
             const SizedBox(height: 8),
             Text(
               'Enter passcode',
@@ -1244,6 +1514,7 @@ class _LockScreenState extends State<LockScreen> with SingleTickerProviderStateM
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1316,14 +1587,10 @@ class _PasscodeStepScreenState extends State<_PasscodeStepScreen> with SingleTic
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
-      appBar: AppBar(
-        backgroundColor: colors.bg,
-        elevation: 0,
-        toolbarHeight: kToolbarHeight * scale,
-        iconTheme: IconThemeData(color: colors.ink, size: 24 * scale),
-      ),
+    return GlassBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: glassAppBar(context),
       body: SafeArea(
         child: Column(
           children: [
@@ -1357,6 +1624,7 @@ class _PasscodeStepScreenState extends State<_PasscodeStepScreen> with SingleTic
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1476,50 +1744,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
-      appBar: AppBar(
-        backgroundColor: colors.bg,
-        elevation: 0,
-        toolbarHeight: kToolbarHeight * scale,
-        iconTheme: IconThemeData(color: colors.ink, size: 24 * scale),
-        title: Text('Settings', style: TextStyle(color: colors.ink, fontWeight: FontWeight.w800, fontSize: 20 * scale)),
+    // iOS "inset grouped" list: every row lives in one glass panel,
+    // separated by hairlines.
+    final rows = <Widget>[
+      _SettingsSwitchRow(
+        scale: scale,
+        title: 'Passcode lock',
+        subtitle: 'Require a 4-digit passcode to open the app',
+        value: _hasPasscode,
+        onChanged: _togglePasscode,
       ),
-      body: _loading
-          ? const SizedBox.shrink()
-          : ListView(
-              children: [
-                SizedBox(height: 8 * scale),
-                _SettingsSwitchRow(
-                  scale: scale,
-                  title: 'Passcode lock',
-                  subtitle: 'Require a 4-digit passcode to open the app',
-                  value: _hasPasscode,
-                  onChanged: _togglePasscode,
-                ),
-                if (_hasPasscode) ...[
-                  _SettingsTapRow(
-                    scale: scale,
-                    title: 'Change passcode',
-                    onTap: _changePasscode,
-                  ),
-                  if (_biometricAvailable)
-                    _SettingsSwitchRow(
-                      scale: scale,
-                      title: 'Use Face ID / fingerprint',
-                      subtitle: 'Unlock with biometrics instead of typing the passcode',
-                      value: _biometricEnabled,
-                      onChanged: _toggleBiometric,
+      if (_hasPasscode) ...[
+        _SettingsTapRow(
+          scale: scale,
+          title: 'Change passcode',
+          onTap: _changePasscode,
+        ),
+        if (_biometricAvailable)
+          _SettingsSwitchRow(
+            scale: scale,
+            title: 'Use Face ID / fingerprint',
+            subtitle: 'Unlock with biometrics instead of typing the passcode',
+            value: _biometricEnabled,
+            onChanged: _toggleBiometric,
+          ),
+      ],
+    ];
+    return GlassBackdrop(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: glassAppBar(context, title: 'Settings'),
+        body: _loading
+            ? const SizedBox.shrink()
+            : ListView(
+                padding: EdgeInsets.fromLTRB(16 * scale, 8 * scale, 16 * scale, 24 * scale),
+                children: [
+                  Glass(
+                    shape: glassRounded(26),
+                    child: Column(
+                      children: [
+                        for (int i = 0; i < rows.length; i++) ...[
+                          if (i > 0)
+                            Divider(
+                              height: 1,
+                              thickness: 0.5,
+                              indent: 16 * scale,
+                              color: colors.ink.withValues(alpha: 0.12),
+                            ),
+                          rows[i],
+                        ],
+                      ],
                     ),
+                  ),
                 ],
-              ],
-            ),
+              ),
+      ),
     );
   }
 }
 
 // A settings row with a title/subtitle and a toggle. Built from scratch
-// instead of SwitchListTile so the Switch itself -- not just its text --
+// instead of SwitchListTile so the CupertinoSwitch itself -- not just its text --
 // can grow via Transform.scale on tablets; SwitchListTile doesn't expose
 // its internal Switch for that.
 class _SettingsSwitchRow extends StatelessWidget {
@@ -1540,10 +1825,11 @@ class _SettingsSwitchRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    return InkWell(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () => onChanged(!value),
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 12 * scale),
+        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
         child: Row(
           children: [
             Expanded(
@@ -1562,8 +1848,8 @@ class _SettingsSwitchRow extends StatelessWidget {
             SizedBox(width: 12 * scale),
             Transform.scale(
               scale: scale,
-              child: Switch(
-                activeThumbColor: kAccent,
+              child: CupertinoSwitch(
+                activeTrackColor: kAccent,
                 value: value,
                 onChanged: onChanged,
               ),
@@ -1586,16 +1872,17 @@ class _SettingsTapRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    return InkWell(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
+        padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 16 * scale),
         child: Row(
           children: [
             Expanded(
               child: Text(title, style: TextStyle(color: colors.ink, fontSize: 16 * scale)),
             ),
-            Icon(Icons.chevron_right, size: 24 * scale, color: colors.ink.withValues(alpha: 0.4)),
+            Icon(Icons.arrow_forward_ios_rounded, size: 15 * scale, color: colors.ink.withValues(alpha: 0.35)),
           ],
         ),
       ),
@@ -1737,15 +2024,8 @@ class ResetConfirmation {
       title: "Have you resisted until this point?",
       body: subtitle,
       actions: (dialogContext) => [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: Text("No", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
-          onPressed: () => Navigator.pop(dialogContext, false),
-          child: Text("Yes, keep going", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
-        ),
+        GlassDialogAction(label: "No", onTap: () => Navigator.pop(dialogContext, true)),
+        GlassDialogAction(label: "Yes, keep going", tint: kAccent, onTap: () => Navigator.pop(dialogContext, false)),
       ],
     );
     // "Yes, keep going" (or dismissing the dialog) means the streak stays.
@@ -1760,11 +2040,7 @@ class ResetConfirmation {
         title: "Nothing to reset yet",
         body: sureBody,
         actions: (dialogContext) => [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text("Got it", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
-          ),
+          GlassDialogAction(label: "Got it", tint: kAccent, onTap: () => Navigator.pop(dialogContext, true)),
         ],
       );
       return false;
@@ -1775,15 +2051,8 @@ class ResetConfirmation {
       title: "Are you sure?",
       body: sureBody,
       actions: (dialogContext) => [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, false),
-          child: Text("Cancel", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: Text("Reset", style: TextStyle(fontSize: 15 * tabletScale(dialogContext))),
-        ),
+        GlassDialogAction(label: "Cancel", onTap: () => Navigator.pop(dialogContext, false)),
+        GlassDialogAction(label: "Reset", tint: Colors.redAccent, onTap: () => Navigator.pop(dialogContext, true)),
       ],
     );
     return sure ?? false;
@@ -1795,67 +2064,13 @@ class ResetConfirmation {
     required String body,
     required List<Widget> Function(BuildContext) actions,
   }) {
-    return showDialog<bool>(
+    return showGlassDialog<bool>(
       context: context,
-      // Default barrier is 54% black; combined with the dialog's own
-      // translucent background that reads as the whole screen going dark.
-      // A lighter barrier keeps the dim-behind-the-dialog effect subtle.
-      barrierColor: Colors.black.withValues(alpha: 0.3),
-      builder: (dialogContext) {
-        final scale = tabletScale(dialogContext);
-        // Built from a plain Dialog + Column instead of AlertDialog's
-        // title/content/actions slots -- those slots go through an
-        // OverflowBar + Flexible/ScrollView combo that (confirmed by
-        // testing every combination of titlePadding/contentPadding/
-        // actionsPadding/insetPadding, and even plain nested Padding
-        // widgets) renders the actions row past the dialog's own
-        // background on this Flutter version once the dialog gets tall
-        // enough. A bare Column has no such special-cased internals, so
-        // it just sizes to its content like every other Column in this
-        // app (see the bottom sheets).
-        final actionWidgets = actions(dialogContext);
-        return Theme(
-          data: Theme.of(dialogContext).copyWith(
-            elevatedButtonTheme: ElevatedButtonThemeData(
-              style: ElevatedButton.styleFrom(
-                padding: EdgeInsets.symmetric(horizontal: 24 * scale, vertical: 14 * scale),
-              ),
-            ),
-            textButtonTheme: TextButtonThemeData(
-              style: TextButton.styleFrom(
-                padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
-              ),
-            ),
-          ),
-          child: Dialog(
-            backgroundColor: AppColors.of(dialogContext).dialogBg,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            insetPadding: EdgeInsets.symmetric(horizontal: 24 * scale, vertical: 24 * scale),
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(24 * scale, 24 * scale, 24 * scale, 8 * scale),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: dialogTitleStyle(dialogContext)),
-                  SizedBox(height: 12 * scale),
-                  Text(body, style: dialogBodyStyle(dialogContext)),
-                  SizedBox(height: 20 * scale),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      for (int i = 0; i < actionWidgets.length; i++) ...[
-                        if (i > 0) SizedBox(width: 8 * scale),
-                        actionWidgets[i],
-                      ],
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+      builder: (dialogContext) => GlassDialog(
+        title: title,
+        content: Text(body),
+        actions: actions(dialogContext),
+      ),
     );
   }
 }
@@ -1910,10 +2125,20 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
   };
 
   List<Habit> habits = [];
-  late ConfettiController _confettiController;
+
+  // What the home list shows, as ids (so it survives `habits` being
+  // reloaded; the saved order in `habits` itself never changes):
+  // [_order] -- habits still to do today, in saved order, in an animated
+  // list; [_doneIds] -- habits done today, oldest first, gathered into the
+  // collapsible stack at the bottom.
+  List<String> _order = [];
+  List<String> _doneIds = [];
+  GlobalKey<SliverAnimatedListState> _listKey = GlobalKey<SliverAnimatedListState>();
+  static const _moveOut = Duration(milliseconds: 320);
+  static const _moveIn = Duration(milliseconds: 420);
 
   // Reset "damage" effect: the body shakes and a red vignette flashes over
-  // it, instead of the celebratory confetti burst used for a NOPE tap.
+  // it -- the opposite of a NOPE tap's red X / check celebration.
   // _shakeMagnitude scales how hard each plays -- resetting one habit is a
   // small jolt, resetting all of them hits harder.
   late final AnimationController _shakeController = AnimationController(
@@ -1934,13 +2159,59 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     habits = widget.initialHabits;
-    _confettiController = ConfettiController(duration: const Duration(milliseconds: 900));
+    _resort();
     _loadHabits();
   }
 
+  Habit? _byId(String id) {
+    for (final h in habits) {
+      if (h.id == id) return h;
+    }
+    return null;
+  }
+
+  /// Rebuilds [_order] and [_doneIds] from scratch and gives the list a
+  /// fresh key so it re-lays out without animating.
+  void _resort() {
+    final now = DateTime.now();
+    _order = habits.where((h) => !h.tappedToday(now)).map((h) => h.id).toList();
+    _doneIds = habits.where((h) => h.tappedToday(now)).map((h) => h.id).toList();
+    _listKey = GlobalKey<SliverAnimatedListState>();
+  }
+
+  /// A habit finished its done-for-today sequence: it collapses out of the
+  /// to-do list and lands on top of the done stack.
+  void _settleHabit(Habit h) {
+    final from = _order.indexOf(h.id);
+    if (from < 0) return;
+    setState(() {
+      _order.removeAt(from);
+      _listKey.currentState?.removeItem(
+        from,
+        (context, animation) => _listTransition(animation, _habitItem(h, ghost: true)),
+        duration: _moveOut,
+      );
+      _doneIds.add(h.id);
+    });
+  }
+
+  /// A done habit was reset: it leaves the stack and grows back into the
+  /// end of the to-do list.
+  void _unsettleHabit(Habit h) {
+    setState(() {
+      if (!_doneIds.remove(h.id)) return; // was already in the to-do list
+      _order.add(h.id);
+      _listKey.currentState?.insertItem(_order.length - 1, duration: _moveIn);
+    });
+  }
+
+  Widget _listTransition(Animation<double> animation, Widget child) => SizeTransition(
+        sizeFactor: CurvedAnimation(parent: animation, curve: Curves.easeInOutCubic),
+        child: FadeTransition(opacity: animation, child: child),
+      );
+
   @override
   void dispose() {
-    _confettiController.dispose();
     _shakeController.dispose();
     _flashController.dispose();
     super.dispose();
@@ -1968,7 +2239,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
     } else {
       habits = [];
     }
-    setState(() {});
+    setState(_resort);
     _checkWelcomeBack(prefs, now);
   }
 
@@ -1992,24 +2263,17 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
     if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      showDialog(
+      showGlassDialog(
         context: context,
-        builder: (dialogContext) => AlertDialog(
-          backgroundColor: AppColors.of(dialogContext).dialogBg,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Text("Welcome back", style: dialogTitleStyle(dialogContext)),
+        builder: (dialogContext) => GlassDialog(
+          title: "Welcome back",
           content: Text(
             brokenStreaks > 0
                 ? "It's been $daysAway days. $brokenStreaks streak${brokenStreaks == 1 ? '' : 's'} reset while you were away — ready for a fresh start?"
                 : "It's been $daysAway days since you checked in. Good to see you again.",
-            style: dialogBodyStyle(dialogContext),
           ),
           actions: [
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: kAccent, foregroundColor: Colors.white),
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text("Let's go"),
-            ),
+            GlassDialogAction(label: "Let's go", tint: kAccent, onTap: () => Navigator.pop(dialogContext)),
           ],
         ),
       );
@@ -2026,6 +2290,8 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      elevation: 0,
+      barrierColor: Colors.black.withValues(alpha: 0.25),
       // Material 3's default bottom-sheet theme caps width at 640 and
       // centers it on wide viewports -- fine on phones (narrower anyway)
       // but leaves dead space on either side on tablets. Overriding with an
@@ -2034,13 +2300,26 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
       builder: (context) => _AddHabitSheet(),
     );
     if (created != null) {
-      setState(() => habits.add(created));
+      setState(() {
+        habits.add(created);
+        _order.add(created.id);
+        _listKey.currentState?.insertItem(_order.length - 1, duration: _moveIn);
+      });
       _saveHabits();
     }
   }
 
   void _deleteHabit(Habit h) {
-    setState(() => habits.removeWhere((x) => x.id == h.id));
+    setState(() {
+      final at = _order.indexOf(h.id);
+      if (at >= 0) {
+        _order.removeAt(at);
+        // Dismissible has already animated the card away.
+        _listKey.currentState?.removeItem(at, (_, _) => const SizedBox.shrink(), duration: Duration.zero);
+      }
+      _doneIds.remove(h.id);
+      habits.removeWhere((x) => x.id == h.id);
+    });
     h.dispose();
     _saveHabits();
   }
@@ -2065,6 +2344,8 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
     // Habit.reset() calls notifyListeners() itself — only the AnimatedBuilder
     // wrapping this one card rebuilds, so no setState() here.
     h.reset();
+    // A done habit comes back out of the stack, to the end of the to-do list.
+    _unsettleHabit(h);
     _playResetImpact();
     _saveHabits();
   }
@@ -2079,12 +2360,13 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
 
   void _pressNope(Habit h) {
     final now = DateTime.now();
-    // No setState() — h.nope() notifies only this habit's own listeners,
-    // so the other cards in the list never rebuild.
+    // h.nope() notifies only this habit's own card. The one setState below
+    // is for the evening risk banner, whose "N habits still need a NOPE"
+    // count lives up here and changes only when a tap actually counts.
     final incremented = h.nope(now, _adaptiveMessage);
     if (incremented) {
+      setState(() {});
       HapticFeedback.heavyImpact();
-      _confettiController.play();
     } else {
       HapticFeedback.lightImpact();
     }
@@ -2116,88 +2398,162 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
     return _habitsAtRiskCount() > 0;
   }
 
+  /// One habit's list entry: its card, swipeable to delete. A [ghost] is the
+  /// copy AnimatedList shows collapsing out of a card's old slot during a
+  /// move -- inert, and keyed apart from the real card.
+  Widget _habitItem(Habit h, {bool ghost = false}) {
+    final card = _HabitCard(
+      key: ValueKey(ghost ? 'ghost-${h.id}' : h.id),
+      habit: h,
+      toneOptions: tonePacks.keys.toList(),
+      onNope: () => _pressNope(h),
+      onReset: () => _resetHabit(h),
+      onColorChanged: (c) => _changeColor(h, c),
+      onIconChanged: (i) => _changeIcon(h, i),
+      // Once its done-for-today sequence finishes, sink it to the bottom.
+      onSettled: () => _settleHabit(h),
+    );
+    if (ghost) return IgnorePointer(child: card);
+    return Dismissible(
+      key: ValueKey('dismiss-${h.id}'),
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 14),
+        decoration: ShapeDecoration(
+          color: Colors.redAccent.withValues(alpha: 0.18),
+          shape: glassRounded(28),
+        ),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 24),
+        child: const Icon(Icons.delete_outline, color: Colors.redAccent),
+      ),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        return await showGlassDialog<bool>(
+          context: context,
+          builder: (dialogContext) => GlassDialog(
+            title: "Delete habit?",
+            content: Text('Remove "${h.name}" and its history?'),
+            actions: [
+              GlassDialogAction(label: "Cancel", onTap: () => Navigator.pop(dialogContext, false)),
+              GlassDialogAction(
+                label: "Delete",
+                tint: Colors.redAccent,
+                onTap: () => Navigator.pop(dialogContext, true),
+              ),
+            ],
+          ),
+        ) ?? false;
+      },
+      onDismissed: (_) => _deleteHabit(h),
+      child: card,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
+    final ink2 = colors.ink.withValues(alpha: 0.75);
+    final iconSize = 21 * scale;
+    final itemSize = 40 * scale;
+    return GlassBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        backgroundColor: colors.bg,
-        elevation: 0,
         titleSpacing: 24,
-        toolbarHeight: kToolbarHeight * scale,
+        toolbarHeight: (kToolbarHeight + 8) * scale,
         title: Text(
           "nope.",
           style: TextStyle(
-            fontSize: 28 * scale,
-            fontWeight: FontWeight.w900,
+            fontSize: 30 * scale,
+            fontWeight: FontWeight.w800,
             color: colors.ink,
-            letterSpacing: -1.5,
+            letterSpacing: -0.9,
           ),
         ),
         actions: [
-          // Light/dark mode switch.
-          ValueListenableBuilder<ThemeMode>(
-            valueListenable: themeModeNotifier,
-            builder: (context, mode, _) => IconButton(
-              tooltip: mode == ThemeMode.dark ? "Switch to light mode" : "Switch to dark mode",
-              icon: Icon(
-                mode == ThemeMode.dark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                size: 30 * scale,
-                color: colors.ink.withValues(alpha: 0.54),
+          // Secondary actions share one glass capsule; "add" is the primary
+          // action, so it gets its own filled-glass circle (iOS 26 toolbar).
+          GlassToolbar(
+            height: 44 * scale,
+            children: [
+              ValueListenableBuilder<ThemeMode>(
+                valueListenable: themeModeNotifier,
+                builder: (context, mode, _) => GlassToolbarItem(
+                  tooltip: mode == ThemeMode.dark ? "Switch to light mode" : "Switch to dark mode",
+                  icon: mode == ThemeMode.dark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                  size: itemSize,
+                  iconSize: iconSize,
+                  color: ink2,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    toggleThemeMode();
+                  },
+                ),
               ),
-              onPressed: () {
-                HapticFeedback.selectionClick();
-                toggleThemeMode();
-              },
-            ),
-          ),
-          if (habits.isNotEmpty)
-            IconButton(
-              tooltip: "Calendar view",
-              icon: Icon(Icons.calendar_month_outlined, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => CalendarView(habits: habits)),
-              ),
-            ),
-          if (habits.isNotEmpty)
-            IconButton(
-              tooltip: "Reset all streaks",
-              icon: Icon(Icons.restart_alt, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
-              onPressed: () async {
-                final confirmed = await ResetConfirmation.confirm(
-                  context,
-                  subtitle: "This clears every habit's streak back to zero, not just one.",
-                  sureBody: "Every one of these streaks is a day you chose yourself over "
-                      "the urge. Resetting wipes all of that away at once. Are you sure?",
-                  hasProgress: habits.any((h) => h.streak > 0),
-                );
-                if (!confirmed) return;
+              if (habits.isNotEmpty)
+                GlassToolbarItem(
+                  tooltip: "Calendar view",
+                  icon: Icons.calendar_month_outlined,
+                  size: itemSize,
+                  iconSize: iconSize,
+                  color: ink2,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => CalendarView(habits: habits)),
+                  ),
+                ),
+              if (habits.isNotEmpty)
+                GlassToolbarItem(
+                  tooltip: "Reset all streaks",
+                  icon: Icons.restart_alt,
+                  size: itemSize,
+                  iconSize: iconSize,
+                  color: ink2,
+                  onTap: () async {
+                    final confirmed = await ResetConfirmation.confirm(
+                      context,
+                      subtitle: "This clears every habit's streak back to zero, not just one.",
+                      sureBody: "Every one of these streaks is a day you chose yourself over "
+                          "the urge. Resetting wipes all of that away at once. Are you sure?",
+                      hasProgress: habits.any((h) => h.streak > 0),
+                    );
+                    if (!confirmed) return;
 
-                HapticFeedback.heavyImpact();
-                for (final h in habits) {
-                  h.reset(); // notifies only that habit's own card
-                }
-                _playResetImpact(magnitude: 1.8);
-                _saveHabits();
-              },
-            ),
-          IconButton(
+                    HapticFeedback.heavyImpact();
+                    for (final h in habits) {
+                      h.reset(); // notifies only that habit's own card
+                    }
+                    // Everything is to-do again: back to the saved order.
+                    setState(_resort);
+                    _playResetImpact(magnitude: 1.8);
+                    _saveHabits();
+                  },
+                ),
+              GlassToolbarItem(
+                tooltip: "Settings",
+                icon: Icons.settings_outlined,
+                size: itemSize,
+                iconSize: iconSize,
+                color: ink2,
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(width: 8 * scale),
+          GlassIconButton(
             tooltip: "Add habit",
-            icon: Icon(Icons.add_rounded, size: 30 * scale, color: colors.ink),
-            onPressed: _addHabit,
+            icon: Icons.add_rounded,
+            size: 44 * scale,
+            iconSize: 24 * scale,
+            tint: kAccent,
+            prominent: true,
+            onTap: _addHabit,
           ),
-          IconButton(
-            tooltip: "Settings",
-            icon: Icon(Icons.settings_outlined, size: 30 * scale, color: colors.ink.withValues(alpha: 0.54)),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ),
-          ),
-          const SizedBox(width: 8),
+          SizedBox(width: 16 * scale),
         ],
       ),
       body: Stack(
@@ -2220,104 +2576,41 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
                 if (_showRiskBanner())
                   _RiskBanner(count: _habitsAtRiskCount()),
                 Expanded(
-                  child: ListView.builder(
-              padding: EdgeInsets.only(top: isTablet(context) ? 32 : 8, bottom: 24, left: 16, right: 16),
-              itemCount: habits.length,
-              itemBuilder: (context, i) {
-                final h = habits[i];
-                return Dismissible(
-                  key: ValueKey(h.id),
-                  background: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.redAccent.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    alignment: Alignment.centerLeft,
-                    padding: const EdgeInsets.only(left: 24),
-                    child: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                  ),
-                  direction: DismissDirection.startToEnd,
-                  confirmDismiss: (_) async {
-                    return await showDialog<bool>(
-                      context: context,
-                      builder: (dialogContext) => AlertDialog(
-                        backgroundColor: AppColors.of(dialogContext).dialogBg,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        title: Text("Delete habit?", style: dialogTitleStyle(dialogContext)),
-                        content: Text(
-                          'Remove "${h.name}" and its history?',
-                          style: dialogBodyStyle(dialogContext),
+                  child: CustomScrollView(
+                    slivers: [
+                      SliverPadding(
+                        padding: EdgeInsets.only(top: isTablet(context) ? 32 : 12, left: 16, right: 16),
+                        sliver: SliverAnimatedList(
+                          key: _listKey,
+                          initialItemCount: _order.length,
+                          itemBuilder: (context, i, animation) {
+                            final h = _byId(_order[i]);
+                            if (h == null) return const SizedBox.shrink();
+                            return _listTransition(animation, _habitItem(h));
+                          },
                         ),
-                        actions: [
-                          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text("Cancel")),
-                          ElevatedButton(
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
-                            onPressed: () => Navigator.pop(dialogContext, true),
-                            child: const Text("Delete"),
-                          ),
-                        ],
                       ),
-                    ) ?? false;
-                  },
-                  onDismissed: (_) => _deleteHabit(h),
-                  child: _HabitCard(
-                    habit: h,
-                    toneOptions: tonePacks.keys.toList(),
-                    onNope: () => _pressNope(h),
-                    onReset: () => _resetHabit(h),
-                    onColorChanged: (c) => _changeColor(h, c),
-                    onIconChanged: (i) => _changeIcon(h, i),
-                  ),
-                );
-              },
+                      // Everything resisted today.
+                      if (_order.isEmpty && _doneIds.isNotEmpty)
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+                          sliver: SliverToBoxAdapter(child: _AllDoneCard(count: _doneIds.length)),
+                        ),
+                      if (_doneIds.isNotEmpty)
+                        SliverPadding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          sliver: SliverToBoxAdapter(
+                            child: _DoneStack(
+                              habits: [for (final id in _doneIds) ?_byId(id)],
+                              itemBuilder: (h) => _habitItem(h),
+                            ),
+                          ),
+                        ),
+                      const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                    ],
                   ),
                 ),
               ],
-            ),
-          ),
-          // Multiple emitters (one per Align position) each looked up their
-          // own screen position via findRenderObject() at the instant
-          // play() fired -- that lookup could lose the race against layout
-          // and fall back to Offset.zero, dumping every particle in the
-          // top-left corner instead of across the top edge. A single
-          // emitter avoids that race entirely (nothing to desync), so scale
-          // its blast force to the screen width instead of adding more
-          // emitters -- that's what actually reaches the edges on a wide
-          // landscape/tablet screen.
-          Positioned.fill(
-            child: IgnorePointer(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Builder(
-                  builder: (context) {
-                    final screenWidth = MediaQuery.of(context).size.width;
-                    // Blast distance doesn't scale linearly with force --
-                    // drag makes it fall off, so a screen-width-proportional
-                    // force undershoots badly on wide tablets (measured:
-                    // 3.66x force only reached ~55% of the way to the edge
-                    // on a 1464dp-wide screen). Scale more aggressively.
-                    final forceScale = (screenWidth / 160).clamp(1.0, 14.0);
-                    return ConfettiWidget(
-                      confettiController: _confettiController,
-                      blastDirectionality: BlastDirectionality.explosive,
-                      shouldLoop: false,
-                      maxBlastForce: 25 * forceScale,
-                      minBlastForce: 8 * forceScale,
-                      emissionFrequency: 0.04,
-                      numberOfParticles: 18,
-                      gravity: 0.35,
-                      colors: [
-                        colors.ink,
-                        kAccent,
-                        const Color(0xFFD7546C),
-                        const Color(0xFF547B66),
-                        const Color(0xFFB6A02B),
-                      ],
-                    );
-                  },
-                ),
-              ),
             ),
           ),
           // Red "damage" vignette that flashes in and fades out on reset --
@@ -2349,6 +2642,7 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
           ),
         ],
       ),
+      ),
     );
   }
 }
@@ -2364,14 +2658,13 @@ class _RiskBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Glass(
+      shape: glassRounded(18),
+      tint: kAccent,
+      tintStrength: 0.22,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: kAccent.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: kAccent.withValues(alpha: 0.3)),
-      ),
       child: Row(
         children: [
           Icon(Icons.nightlight_round, size: 18, color: kAccent),
@@ -2389,6 +2682,7 @@ class _RiskBanner extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -2444,19 +2738,27 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Container(
+    final mq = MediaQuery.of(context);
+    // A floating glass sheet (inset from the screen edges, all corners
+    // rounded) like iOS 26's sheets. It rides up on top of the keyboard via
+    // the outer padding.
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        8 * scale, 0, 8 * scale, mq.viewInsets.bottom + math.max(8.0, mq.viewPadding.bottom),
+      ),
+      child: ConstrainedBox(
       // Capped below the full screen height (rather than sizing purely to
       // content) so on shorter devices the sheet scrolls instead of its
       // Column overflowing past the bottom of the screen.
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
-      decoration: BoxDecoration(
-        color: colors.card,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-        border: Border.all(color: colors.ink.withValues(alpha: 0.06)),
-      ),
-      padding: EdgeInsets.fromLTRB(
-        22 * scale, 14 * scale, 22 * scale, MediaQuery.of(context).viewInsets.bottom + 28 * scale,
-      ),
+      constraints: BoxConstraints(maxHeight: mq.size.height * 0.88),
+      // Same glass as a habit card (tinted with the colour being picked), so
+      // the sheet reads as the card you're creating.
+      child: Glass(
+      shape: glassRounded(36),
+      tint: selectedColor,
+      tintStrength: habitGlassTint(context),
+      blur: 30,
+      padding: EdgeInsets.fromLTRB(22 * scale, 14 * scale, 22 * scale, 22 * scale),
       child: SingleChildScrollView(
         child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -2494,16 +2796,25 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               borderRadius: BorderRadius.circular(20),
               border: Border.all(color: selectedColor.withValues(alpha: 0.25)),
             ),
-            child: Row(
+            // Icon pinned left; the two lines centred across the whole box.
+            // The text is inset by the icon's width on *both* sides, so it
+            // stays truly centred and a long name can never run under the
+            // icon.
+            child: Stack(
+              alignment: Alignment.center,
               children: [
-                Icon(selectedIcon, color: selectedColor, size: 44 * scale),
-                SizedBox(width: 14 * scale),
-                Expanded(
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(selectedIcon, color: selectedColor, size: 44 * scale),
+                ),
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: (44 + 14) * scale),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        nameCtrl.text.trim().isEmpty ? "New habit" : nameCtrl.text.trim(),
+                        nameCtrl.text.trim().isEmpty ? "New Habit" : nameCtrl.text.trim(),
+                        textAlign: TextAlign.center,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 19 * scale,
@@ -2514,6 +2825,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       SizedBox(height: 2 * scale),
                       Text(
                         "Starting streak: $streak day${streak == 1 ? '' : 's'}",
+                        textAlign: TextAlign.center,
                         style: TextStyle(fontSize: 12.5 * scale, color: colors.ink.withValues(alpha: 0.54), fontWeight: FontWeight.w500),
                       ),
                     ],
@@ -2542,13 +2854,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             style: TextStyle(fontSize: 11.5 * scale, color: colors.ink.withValues(alpha: 0.38), fontWeight: FontWeight.w700, letterSpacing: 0.8),
           ),
           SizedBox(height: 8 * scale),
-          Container(
+          Glass(
+            shape: glassRounded(16),
+            // Sits on the sheet's own glass, which already blurred the page.
+            blur: 0,
+            shadows: const [],
             padding: EdgeInsets.symmetric(horizontal: 6 * scale, vertical: 6 * scale),
-            decoration: BoxDecoration(
-              color: colors.ink.withValues(alpha: 0.05),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: colors.ink.withValues(alpha: 0.12)),
-            ),
             child: Row(
               children: [
                 _StepperButton(
@@ -2591,27 +2902,17 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               ...presetColors.entries.map((entry) {
                 final isSelected = entry.value == selectedColor;
                 return Expanded(
-                  child: GestureDetector(
-                    onTap: () {
-                      HapticFeedback.selectionClick();
-                      setState(() => selectedColor = entry.value);
-                    },
-                    child: Padding(
-                      padding: EdgeInsets.only(right: 8 * scale),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeOut,
-                        height: 52 * scale,
-                        decoration: BoxDecoration(
-                          color: entry.value.withValues(alpha: isSelected ? 0.22 : 0.08),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: isSelected ? entry.value : Colors.transparent,
-                            width: 2,
-                          ),
-                        ),
-                        child: Center(
-                          child: AnimatedScale(
+                  child: Padding(
+                    padding: EdgeInsets.only(right: 8 * scale),
+                    child: _GlassSwatchTile(
+                      tint: entry.value,
+                      selected: isSelected,
+                      height: 52 * scale,
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        setState(() => selectedColor = entry.value);
+                      },
+                      child: AnimatedScale(
                             duration: const Duration(milliseconds: 200),
                             scale: isSelected ? 1.0 : 0.85,
                             child: Container(
@@ -2629,8 +2930,6 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                                   : null,
                             ),
                           ),
-                        ),
-                      ),
                     ),
                   ),
                 );
@@ -2638,7 +2937,6 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               _customColorCardSwatch(
                 current: selectedColor,
                 isCustom: !_isPresetColor(selectedColor),
-                ink: colors.ink,
                 scale: scale,
                 onTap: () async {
                   final picked = await _pickCustomColor(context, selectedColor);
@@ -2662,29 +2960,23 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             runSpacing: 10 * scale,
             children: presetIcons.map((icon) {
               final isSelected = icon.codePoint == selectedIcon.codePoint;
-              return GestureDetector(
+              // Glass discs; the selected one fills with the habit colour.
+              return GlassIconButton(
+                icon: icon,
+                size: 44 * scale,
+                iconSize: 20 * scale,
+                tint: isSelected ? selectedColor : null,
+                prominent: isSelected,
+                color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.6),
+                // Sits on the sheet's own glass, which already blurred the page.
+                blur: 0,
+                shadows: isSelected
+                    ? [BoxShadow(color: selectedColor.withValues(alpha: 0.45), blurRadius: 12)]
+                    : glassControlShadow(context),
                 onTap: () {
                   HapticFeedback.selectionClick();
                   setState(() => selectedIcon = icon);
                 },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  curve: Curves.easeOut,
-                  width: 44 * scale,
-                  height: 44 * scale,
-                  decoration: BoxDecoration(
-                    color: isSelected ? selectedColor : colors.ink.withValues(alpha: 0.06),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: isSelected ? Colors.white : Colors.transparent,
-                      width: 2,
-                    ),
-                    boxShadow: isSelected
-                        ? [BoxShadow(color: selectedColor.withValues(alpha: 0.45), blurRadius: 10)]
-                        : [],
-                  ),
-                  child: Icon(icon, size: 20 * scale, color: isSelected ? Colors.white : colors.ink.withValues(alpha: 0.54)),
-                ),
               );
             }).toList(),
           ),
@@ -2693,51 +2985,35 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           Row(
             children: [
               Expanded(
-                child: _PressableButton(
+                child: GlassButton(
                   onTap: () => Navigator.pop(context),
-                  child: Container(
-                    padding: EdgeInsets.symmetric(vertical: 17 * scale),
-                    decoration: BoxDecoration(
-                      color: colors.ink.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Center(
-                      child: Text(
-                        "Cancel",
-                        style: TextStyle(color: colors.ink.withValues(alpha: 0.6), fontSize: 15 * scale, fontWeight: FontWeight.w700),
-                      ),
-                    ),
+                  blur: 0,
+                  shadows: glassControlShadow(context),
+                  padding: EdgeInsets.symmetric(vertical: 17 * scale),
+                  child: Text(
+                    "Cancel",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: colors.ink.withValues(alpha: 0.7), fontSize: 15 * scale, fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
               SizedBox(width: 12 * scale),
               Expanded(
                 flex: 2,
-                child: _PressableButton(
+                child: GlassButton(
                   onTap: _submit,
-                  child: Container(
-                    padding: EdgeInsets.symmetric(vertical: 17 * scale),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [selectedColor, selectedColor.withValues(alpha: 0.7)],
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(color: selectedColor.withValues(alpha: 0.35), blurRadius: 16, offset: const Offset(0, 6)),
-                      ],
-                    ),
-                    child: Center(
-                      child: Text(
-                        "Add Habit",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15.5 * scale,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.2,
-                        ),
-                      ),
+                  blur: 0,
+                  tint: selectedColor,
+                  prominent: true,
+                  padding: EdgeInsets.symmetric(vertical: 17 * scale),
+                  child: Text(
+                    "Add Habit",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 15.5 * scale,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.2,
                     ),
                   ),
                 ),
@@ -2746,6 +3022,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           ),
         ],
         ),
+      ),
+      ),
       ),
     );
   }
@@ -2758,19 +3036,20 @@ class _StepperButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final enabled = onTap != null;
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 44 * scale,
-        height: 44 * scale,
-        decoration: BoxDecoration(
-          color: colors.ink.withValues(alpha: enabled ? 0.08 : 0.02),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Icon(icon, size: 18 * scale, color: enabled ? colors.ink : colors.ink.withValues(alpha: 0.24)),
+    // Glass key; GlassButton dims itself when onTap is null (e.g. "-" at 0).
+    return SizedBox(
+      width: 44 * scale,
+      height: 44 * scale,
+      child: GlassButton(
+        onTap: onTap,
+        shape: glassRounded(12),
+        // Sits on the sheet's own glass, which already blurred the page.
+        blur: 0,
+        shadows: glassControlShadow(context),
+        pressedScale: 0.9,
+        child: Center(child: Icon(icon, size: 18 * scale, color: colors.ink)),
       ),
     );
   }
@@ -2797,28 +3076,30 @@ class _StyledTextField extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return TextField(
-      controller: controller,
-      keyboardType: keyboardType,
-      onChanged: onChanged == null ? null : (_) => onChanged!(),
-      style: TextStyle(color: colors.ink, fontSize: 16 * scale, fontWeight: FontWeight.w600),
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        prefixIcon: icon == null ? null : Icon(icon, size: 19 * scale, color: colors.ink.withValues(alpha: 0.38)),
-        labelStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38)),
-        hintStyle: TextStyle(color: colors.ink.withValues(alpha: 0.24), fontWeight: FontWeight.w500),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: colors.ink.withValues(alpha: 0.12)),
+    // A glass well: the Glass supplies the surface and edge, the field
+    // itself is borderless and unfilled.
+    return Glass(
+      shape: glassRounded(16),
+      // Sits on the sheet's own glass, which already blurred the page.
+      blur: 0,
+      shadows: const [],
+      child: TextField(
+        controller: controller,
+        keyboardType: keyboardType,
+        onChanged: onChanged == null ? null : (_) => onChanged!(),
+        style: TextStyle(color: colors.ink, fontSize: 16 * scale, fontWeight: FontWeight.w600),
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          prefixIcon: icon == null ? null : Icon(icon, size: 19 * scale, color: colors.ink.withValues(alpha: 0.45)),
+          labelStyle: TextStyle(color: colors.ink.withValues(alpha: 0.38)),
+          hintStyle: TextStyle(color: colors.ink.withValues(alpha: 0.35), fontWeight: FontWeight.w500),
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          contentPadding: EdgeInsets.symmetric(vertical: 16 * scale, horizontal: 16 * scale),
+          filled: false,
         ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: kAccent),
-        ),
-        contentPadding: EdgeInsets.symmetric(vertical: 16 * scale, horizontal: 16 * scale),
-        filled: true,
-        fillColor: colors.ink.withValues(alpha: 0.05),
       ),
     );
   }
@@ -2836,7 +3117,12 @@ class _HabitCard extends StatefulWidget {
   final ValueChanged<Color> onColorChanged;
   final ValueChanged<IconData> onIconChanged;
 
+  /// Called once the done-for-today sequence has played and the card has
+  /// greyed out -- the list uses it to move the card to the bottom.
+  final VoidCallback? onSettled;
+
   const _HabitCard({
+    super.key,
     required this.habit,
     required this.toneOptions,
     required this.onNope,
@@ -2844,17 +3130,56 @@ class _HabitCard extends StatefulWidget {
     required this.onColorChanged,
     required this.onIconChanged,
     this.onToneChanged,
+    this.onSettled,
   });
 
   @override
   State<_HabitCard> createState() => _HabitCardState();
 }
 
-class _HabitCardState extends State<_HabitCard> {
+class _HabitCardState extends State<_HabitCard> with SingleTickerProviderStateMixin {
   // Tracks the streak value from the previous rebuild so a reset (streak
   // suddenly dropping) can be told apart from a normal +1 NOPE tap -- only
   // the former gets the quick scroll-down-to-0 animation.
   int? _lastKnownStreak;
+
+  /// Drives the "done for today" sequence (see [_NopeStage] for the
+  /// timeline): red X over the icon, NOPE button poofs, big check draws in.
+  /// Starts finished if the habit was already done today, so reopening the
+  /// app shows the end state without replaying it.
+  late final AnimationController _celebrate = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+    value: widget.habit.tappedToday(DateTime.now()) ? 1 : 0,
+  );
+
+  @override
+  void dispose() {
+    _celebrate.dispose();
+    super.dispose();
+  }
+
+  /// Plays the sequence only for the tap that actually counts the habit
+  /// for today -- not for a repeat tap on an already-done habit.
+  void _handleNope() {
+    final wasDone = habit.tappedToday(DateTime.now());
+    onNope();
+    if (!wasDone && habit.tappedToday(DateTime.now())) {
+      _celebrate.forward(from: 0).then((_) {
+        if (!mounted) return;
+        setState(() {}); // grey out now the sequence has finished
+        // Let the grey-out land before the card moves.
+        Future.delayed(const Duration(milliseconds: 600), () {
+          if (mounted && habit.tappedToday(DateTime.now())) widget.onSettled?.call();
+        });
+      });
+    }
+  }
+
+  /// Done for today and the sequence has finished: the card is greyed out
+  /// and only its reset button responds.
+  bool _isSettled(bool tappedToday) =>
+      tappedToday && _celebrate.status == AnimationStatus.completed;
 
   Habit get habit => widget.habit;
   VoidCallback get onNope => widget.onNope;
@@ -2870,32 +3195,12 @@ class _HabitCardState extends State<_HabitCard> {
     // AnimatedBuilder subscribes directly to `habit` (a ChangeNotifier), so
     // this is the *only* widget that rebuilds when this habit changes —
     // tapping NOPE on one card no longer touches the other cards at all.
-    final colors = AppColors.of(context);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return RepaintBoundary(
       child: AnimatedBuilder(
         animation: habit,
-        // Opacity here composites the *entire* already-rendered card (icon,
-        // text, and all) as one semi-transparent layer over whatever's
-        // behind it, unlike the fill/gradient alphas inside _buildCard
-        // which only blend the background panel underneath the content.
-        // This is what actually reads as "the card's opacity is turned
-        // down" rather than "the card's background color is lighter." The
-        // outline is drawn separately via foregroundDecoration, on top of
-        // and unaffected by that inner Opacity, so the card's edge stays
-        // crisp/dark instead of fading along with everything else.
-        builder: (context, _) => Container(
-          margin: const EdgeInsets.only(bottom: 12),
-          foregroundDecoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: colors.ink.withValues(alpha: isDark ? 0.14 : 0.06),
-            ),
-          ),
-          child: Opacity(
-            opacity: isDark ? 0.88 : 1.0,
-            child: _buildCard(context),
-          ),
+        builder: (context, _) => Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: _buildCard(context),
         ),
       ),
     );
@@ -2903,7 +3208,6 @@ class _HabitCardState extends State<_HabitCard> {
 
   Widget _buildCard(BuildContext context) {
     final colors = AppColors.of(context);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final scale = tabletScale(context);
     final habitColor = Color(habit.colorValue);
     final tappedToday = habit.tappedToday(DateTime.now());
@@ -2913,34 +3217,15 @@ class _HabitCardState extends State<_HabitCard> {
     final justReset = currentStreak < previousStreak;
     _lastKnownStreak = currentStreak;
 
-    return Container(
-      decoration: BoxDecoration(
-        // Translucent card panel (same treatment as every other card/popup
-        // in the app) with the habit's own color tinted on top -- without
-        // this base fill the card was just a faint color wash with nothing
-        // solid behind it, so the transparency change was invisible here.
-        // Dark mode's scaffold background is brightened slightly (see
-        // AppColors.dark.bg) to give this extra-transparent fill something
-        // to show through. The outline lives on the wrapper in build() now
-        // (outside this widget's Opacity), so it isn't duplicated here.
-        color: isDark ? colors.card.withValues(alpha: 0.4) : colors.card,
-        gradient: LinearGradient(
-          colors: [
-            habitColor.withValues(alpha: 0.24),
-            habitColor.withValues(alpha: 0.06),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.06),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
+    final settled = _isSettled(tappedToday);
+
+    // A pane of glass washed in the habit's own colour. Once done for today
+    // it fades to grey and stops responding -- except the reset button,
+    // which sits above the grey layer, in full colour.
+    final glassCard = Glass(
+      shape: glassRounded(28),
+      tint: habitColor,
+      tintStrength: habitGlassTint(context),
       child: Padding(
         padding: EdgeInsets.fromLTRB(20 * scale, 18 * scale, 16 * scale, 18 * scale),
         child: Column(
@@ -2961,10 +3246,25 @@ class _HabitCardState extends State<_HabitCard> {
                   onTap: () => _showCustomizeSheet(context),
                   child: Column(
                     children: [
-                      Icon(
-                        habitIconForCodePoint(habit.iconCodePoint),
-                        size: 100 * scale,
-                        color: habitColor,
+                      SizedBox(
+                        width: 100 * scale,
+                        height: 100 * scale,
+                        child: AnimatedBuilder(
+                          animation: _celebrate,
+                          builder: (context, child) => CustomPaint(
+                            // Red X drawn over the icon in the first part of
+                            // the sequence (and left there for the day).
+                            foregroundPainter: _RedXPainter(
+                              progress: tappedToday ? _NopeStage.xPhase.transform(_celebrate.value) : 0,
+                            ),
+                            child: child,
+                          ),
+                          child: Icon(
+                            habitIconForCodePoint(habit.iconCodePoint),
+                            size: 100 * scale,
+                            color: habitColor,
+                          ),
+                        ),
                       ),
                       SizedBox(height: 8 * scale),
                       Text(
@@ -2980,17 +3280,6 @@ class _HabitCardState extends State<_HabitCard> {
                     ],
                   ),
                 ),
-                Positioned(
-                  right: 0,
-                  top: 0,
-                  child: IconButton(
-                    tooltip: "Reset streak",
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                    onPressed: onReset,
-                    icon: Icon(Icons.refresh, size: 20 * scale, color: colors.ink.withValues(alpha: 0.38)),
-                  ),
-                ),
               ],
               ),
             ),
@@ -2998,7 +3287,14 @@ class _HabitCardState extends State<_HabitCard> {
             SizedBox(height: 4 * scale),
 
             // Streak info
-            Row(
+            // Wrap (not Row) so this never throws a RenderFlex overflow --
+            // a fresh habit has no lastTap yet, which used to drop the one
+            // Expanded that kept the two fixed-width chips in check; now
+            // the chips just wrap to a second line if they don't fit.
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8 * scale,
+              runSpacing: 6 * scale,
               children: [
                 justReset
                     ? TweenAnimationBuilder<int>(
@@ -3018,32 +3314,27 @@ class _HabitCardState extends State<_HabitCard> {
                         color: habitColor,
                         highlight: true,
                       ),
-                const SizedBox(width: 8),
                 _StatChip(
                   label: "best",
                   value: "${habit.longestStreak}d",
                   color: colors.ink.withValues(alpha: 0.24),
                 ),
-                if (habit.lastTap != null) ...[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      "last: ${_formatDate(habit.lastTap!)}",
-                      style: TextStyle(fontSize: 11 * scale, color: colors.ink.withValues(alpha: 0.3)),
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                if (habit.lastTap != null)
+                  Text(
+                    "last: ${_formatDate(habit.lastTap!)}",
+                    style: TextStyle(fontSize: 11 * scale, color: colors.ink.withValues(alpha: 0.3)),
                   ),
-                ],
               ],
             ),
 
             SizedBox(height: 18 * scale),
-            // NOPE Button
+            // NOPE button -> poof -> big check mark
             Center(
-              child: _NopeButton(
-                onTap: onNope,
-                color: habitColor,
+              child: _NopeStage(
+                animation: _celebrate,
                 tappedToday: tappedToday,
+                color: habitColor,
+                onTap: _handleNope,
               ),
             ),
 
@@ -3067,22 +3358,158 @@ class _HabitCardState extends State<_HabitCard> {
         ),
       ),
     );
+
+    final resetButton = GlassIconButton(
+      tooltip: "Reset streak",
+      icon: Icons.refresh_rounded,
+      size: 36 * scale,
+      iconSize: 18 * scale,
+      color: colors.ink.withValues(alpha: 0.55),
+      // Sits on the card's glass, which already blurred the page.
+      blur: 0,
+      shadows: const [],
+      onTap: onReset,
+    );
+
+    // Once done for today the whole card greys out and drops out of focus,
+    // and the only thing left to do -- reset -- comes forward as one crisp
+    // button in the middle. [grey] animates 0 -> 1 as that happens.
+    return TweenAnimationBuilder<double>(
+      // begin == end: no animation on first build (a habit already done
+      // when the app opens is simply settled); later changes animate.
+      tween: Tween(begin: settled ? 1 : 0, end: settled ? 1 : 0),
+      duration: const Duration(milliseconds: 450),
+      curve: Curves.easeOut,
+      child: IgnorePointer(ignoring: settled, child: glassCard),
+      builder: (context, grey, card) {
+        return Stack(
+          children: [
+            if (grey == 0)
+              card!
+            else ...[
+              // Greyed, blurred contents -- the blur clipped to the card's
+              // shape so its edge doesn't smear...
+              ClipPath(
+                clipper: ShapeBorderClipper(shape: glassRounded(28)),
+                child: Opacity(
+                  opacity: 1 - 0.35 * grey,
+                  child: ImageFiltered(
+                    imageFilter: ui.ImageFilter.blur(sigmaX: 4 * grey, sigmaY: 4 * grey),
+                    child: ColorFiltered(colorFilter: ColorFilter.matrix(_desaturate(grey)), child: card),
+                  ),
+                ),
+              ),
+              // ...under a crisp pane of frosted glass, so the card keeps a
+              // sharp edge and its contents read as behind glass.
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Opacity(
+                    opacity: grey,
+                    child: Glass(shape: glassRounded(28), blur: 0, shadows: const []),
+                  ),
+                ),
+              ),
+            ],
+            // Small corner reset while the habit is still to do.
+            if (grey < 1)
+              Positioned(
+                top: 18 * scale,
+                right: 16 * scale,
+                child: IgnorePointer(
+                  ignoring: settled,
+                  child: Opacity(opacity: 1 - grey, child: resetButton),
+                ),
+              ),
+            // Once it's done: the habit's name and the one reset button,
+            // centred and in focus over the greyed-out card.
+            if (grey > 0)
+              Positioned.fill(
+                child: Center(
+                  child: IgnorePointer(
+                    ignoring: !settled,
+                    child: Opacity(
+                      opacity: grey,
+                      child: Transform.scale(
+                        scale: 0.85 + 0.15 * grey,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 24 * scale),
+                              child: Text(
+                                habit.name,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 20 * scale,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.4,
+                                  color: colors.ink,
+                                ),
+                              ),
+                            ),
+                            SizedBox(height: 14 * scale),
+                            Semantics(
+                              label: "Reset streak",
+                              child: GlassButton(
+                                onTap: onReset,
+                                padding: EdgeInsets.symmetric(horizontal: 22 * scale, vertical: 13 * scale),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh_rounded, size: 20 * scale, color: kResetRed),
+                                    SizedBox(width: 6 * scale),
+                                    Text(
+                                      "Reset",
+                                      style: TextStyle(
+                                        fontSize: 16 * scale,
+                                        fontWeight: FontWeight.w700,
+                                        color: kResetRed,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Colour matrix blending from full colour (0) to greyscale (1).
+  static List<double> _desaturate(double amount) {
+    const r = 0.2126, g = 0.7152, b = 0.0722;
+    double mix(double identity, double grey) => identity + (grey - identity) * amount;
+    return [
+      mix(1, r), mix(0, g), mix(0, b), 0, 0,
+      mix(0, r), mix(1, g), mix(0, b), 0, 0,
+      mix(0, r), mix(0, g), mix(1, b), 0, 0,
+      0, 0, 0, 1, 0,
+    ];
   }
 
   void _showCustomizeSheet(BuildContext context) async {
     Color tempColor = Color(habit.colorValue);
     IconData tempIcon = habitIconForCodePoint(habit.iconCodePoint);
 
-    final result = await showDialog<(Color, IconData)>(
+    final result = await showGlassDialog<(Color, IconData)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) {
           final colors = AppColors.of(context);
-          return AlertDialog(
-          backgroundColor: colors.dialogBg,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Text("Customize habit", style: dialogTitleStyle(context)),
-          content: SingleChildScrollView(
+          return GlassDialog(
+          title: "Customize habit",
+          content: SizedBox(
+            width: double.infinity,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -3148,15 +3575,8 @@ class _HabitCardState extends State<_HabitCard> {
             ),
           ),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("Cancel"),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: tempColor, foregroundColor: Colors.white),
-              onPressed: () => Navigator.pop(context, (tempColor, tempIcon)),
-              child: const Text("Done"),
-            ),
+            GlassDialogAction(label: "Cancel", onTap: () => Navigator.pop(context)),
+            GlassDialogAction(label: "Done", tint: tempColor, onTap: () => Navigator.pop(context, (tempColor, tempIcon))),
           ],
           );
         },
@@ -3195,12 +3615,14 @@ class _StatChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: 10 * scale, vertical: 5 * scale),
-      decoration: BoxDecoration(
-        color: highlight ? color.withValues(alpha: 0.12) : colors.ink.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    return Glass(
+      shape: const StadiumBorder(),
+      tint: highlight ? color : null,
+      tintStrength: 0.22,
+      blur: 0,
+      rim: 0.7,
+      shadows: const [],
+      padding: EdgeInsets.symmetric(horizontal: 11 * scale, vertical: 5 * scale),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -3209,7 +3631,7 @@ class _StatChip extends StatelessWidget {
             style: TextStyle(
               fontSize: 14 * scale,
               fontWeight: FontWeight.w800,
-              color: highlight ? color : colors.ink.withValues(alpha: 0.54),
+              color: highlight ? color : colors.ink.withValues(alpha: 0.7),
               letterSpacing: -0.5,
             ),
           ),
@@ -3218,7 +3640,7 @@ class _StatChip extends StatelessWidget {
             label,
             style: TextStyle(
               fontSize: 11 * scale,
-              color: highlight ? color.withValues(alpha: 0.7) : colors.ink.withValues(alpha: 0.3),
+              color: highlight ? color.withValues(alpha: 0.8) : colors.ink.withValues(alpha: 0.45),
             ),
           ),
         ],
@@ -3232,14 +3654,8 @@ class _StatChip extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class _NopeButton extends StatefulWidget {
   final VoidCallback onTap;
-  final Color color;
-  final bool tappedToday;
 
-  const _NopeButton({
-    required this.onTap,
-    required this.color,
-    required this.tappedToday,
-  });
+  const _NopeButton({required this.onTap});
 
   @override
   State<_NopeButton> createState() => _NopeButtonState();
@@ -3251,82 +3667,77 @@ class _NopeButtonState extends State<_NopeButton> {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    final color = widget.tappedToday ? widget.color : colors.ink;
-    final bg = widget.tappedToday
-        ? widget.color.withValues(alpha: 0.12)
-        : colors.raised;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final scale = tabletScale(context);
+    final size = 160 * scale;
 
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) {
-        setState(() => _pressed = false);
-        widget.onTap();
-      },
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.91 : 1.0,
-        duration: const Duration(milliseconds: 90),
-        curve: Curves.easeOut,
-        child: AnimatedContainer(
-          // A normal tap's press-to-release is faster than this used to be
-          // (300ms) -- the pressed look never had time to actually appear
-          // before onTapUp reversed it, so the button read as static no
-          // matter how different the two decorations were on paper. 90ms
-          // (matching the AnimatedScale above) lets it actually register.
+    return Semantics(
+      button: true,
+      label: "NOPE",
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) {
+          setState(() => _pressed = false);
+          widget.onTap();
+        },
+        onTapCancel: () => setState(() => _pressed = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.91 : 1.0,
           duration: const Duration(milliseconds: 90),
           curve: Curves.easeOut,
-          width: 160 * scale,
-          height: 160 * scale,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            // A flat single-color fill with a thin border read as a plain
-            // circle with text on it, not a pressable button. A subtle
-            // top-left-to-bottom-right gradient gives it a rounded, glossy
-            // surface at rest; pressed inverts and darkens that gradient and
-            // nearly flattens the shadow, simulating the button sinking
-            // into the surface instead of just a faint tint shift.
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: widget.tappedToday
-                  ? [bg, bg]
-                  : _pressed
-                      ? [
-                          Color.lerp(bg, Colors.black, 0.22)!,
-                          Color.lerp(bg, Colors.black, 0.30)!,
-                        ]
-                      : [
-                          Color.lerp(bg, colors.ink, 0.08)!,
-                          Color.lerp(bg, Colors.black, 0.10)!,
-                        ],
-            ),
-            border: Border.all(
-              color: widget.tappedToday
-                  ? widget.color
-                  : colors.ink.withValues(alpha: _pressed ? 0.28 : 0.16),
-              width: widget.tappedToday ? 2 : 1.5,
-            ),
-            boxShadow: widget.tappedToday
-                ? [BoxShadow(color: widget.color.withValues(alpha: 0.25), blurRadius: 20, spreadRadius: 4)]
-                : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: _pressed ? 0.08 : 0.32),
-                      blurRadius: _pressed ? 2 : 18,
-                      offset: Offset(0, _pressed ? 1 : 9),
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Glass(
+              shape: const CircleBorder(),
+              // Frosted-pane look (even rim, edge glints) just for this
+              // button; everything else uses the standard liquid glass.
+              style: GlassStyle.pane,
+              // Sits inside the habit card's glass, which already blurred
+              // the page behind it.
+              blur: 0,
+              frost: 0,
+              rim: 1.2,
+              shadows: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: _pressed ? 0.08 : (isDark ? 0.22 : 0.08)),
+                  blurRadius: _pressed ? 6 : 18,
+                  offset: Offset(0, _pressed ? 2 : 6),
+                ),
+              ],
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  // Soft light pooling at the bottom.
+                  LiquidLensOptics(glow: _pressed ? 1 : 0),
+                  // Press glow.
+                  AnimatedOpacity(
+                    opacity: _pressed ? 1 : 0,
+                    duration: const Duration(milliseconds: 90),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          colors: [
+                            Colors.white.withValues(alpha: 0.30),
+                            Colors.white.withValues(alpha: 0.02),
+                          ],
+                        ),
+                      ),
                     ),
-                  ],
-          ),
-          child: Center(
-            child: AnimatedDefaultTextStyle(
-              duration: const Duration(milliseconds: 300),
-              style: TextStyle(
-                fontSize: 22 * scale,
-                fontWeight: FontWeight.w900,
-                color: color,
-                letterSpacing: 3,
+                  ),
+                  // "nope." scaled to span most of the button's diameter
+                  // (inset enough to stay clear of the curved edge).
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: size * 0.13),
+                    child: Center(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: _ExtraHeavyText("nope.", color: colors.ink, fontSize: 40 * scale),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              child: Text(widget.tappedToday ? "✓" : "NOPE."),
             ),
           ),
         ),
@@ -3336,33 +3747,527 @@ class _NopeButtonState extends State<_NopeButton> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PRESSABLE BUTTON (reusable animated tap wrapper)
+// "DONE FOR TODAY" SEQUENCE
 // ─────────────────────────────────────────────────────────────────────────────
-class _PressableButton extends StatefulWidget {
+
+/// The NOPE button's slot on a habit card, which plays the done-for-today
+/// sequence when [animation] runs (0 -> 1 over ~1.5s):
+///
+///   0.00-0.35  a red X draws itself over the habit icon (see [_RedXPainter],
+///              driven from the card via [xPhase]);
+///   0.35-0.60  the NOPE button swells and fades -- the "poof" -- while
+///   0.35-0.80  a ring of smoke puffs bursts out and dissipates;
+///   0.55-1.00  a big check mark in the habit's colour draws itself in,
+///              with a slight overshoot.
+///
+/// If the habit isn't done today, the plain NOPE button shows regardless
+/// of where the animation was left (e.g. after a reset or a new day).
+class _NopeStage extends StatelessWidget {
+  final Animation<double> animation;
+  final bool tappedToday;
+  final Color color;
   final VoidCallback onTap;
-  final Widget child;
-  const _PressableButton({required this.onTap, required this.child});
 
-  @override
-  State<_PressableButton> createState() => _PressableButtonState();
-}
+  const _NopeStage({
+    required this.animation,
+    required this.tappedToday,
+    required this.color,
+    required this.onTap,
+  });
 
-class _PressableButtonState extends State<_PressableButton> {
-  bool _pressed = false;
+  static const xPhase = Interval(0.0, 0.35, curve: Curves.easeInOut);
+  static const _poofPhase = Interval(0.35, 0.60, curve: Curves.easeOut);
+  static const _puffPhase = Interval(0.35, 0.80, curve: Curves.easeOut);
+  static const _checkDraw = Interval(0.55, 0.95, curve: Curves.easeOutCubic);
+  static const _checkPop = Interval(0.55, 1.0, curve: Curves.easeOutBack);
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) {
-        setState(() => _pressed = false);
-        widget.onTap();
+    final size = 160 * tabletScale(context);
+    final smoke = AppColors.of(context).ink;
+    return AnimatedBuilder(
+      animation: animation,
+      builder: (context, _) {
+        final t = tappedToday ? animation.value : 0.0;
+        final poof = _poofPhase.transform(t);
+        final puffs = _puffPhase.transform(t);
+        final check = _checkDraw.transform(t);
+        return SizedBox(
+          width: size,
+          height: size,
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.center,
+            children: [
+              if (poof < 1)
+                Opacity(
+                  opacity: 1 - poof,
+                  child: Transform.scale(scale: 1 + 0.35 * poof, child: _NopeButton(onTap: onTap)),
+                ),
+              if (puffs > 0 && puffs < 1)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(painter: _PoofPainter(progress: puffs, color: smoke)),
+                  ),
+                ),
+              if (check > 0)
+                Semantics(
+                  button: true,
+                  label: "Done for today",
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onTap,
+                    child: Transform.scale(
+                      scale: 0.6 + 0.4 * _checkPop.transform(t),
+                      child: CustomPaint(
+                        size: Size.square(size),
+                        painter: _CheckPainter(progress: check, color: color),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
       },
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.96 : 1.0,
-        duration: const Duration(milliseconds: 100),
-        child: widget.child,
+    );
+  }
+}
+
+/// Paints the first [progress] (0-1) of [path] as a stroke. A segment
+/// shorter than half the stroke width is skipped, so a round-capped stroke
+/// never flashes up as a lone dot on its first frame.
+void _drawPartialPath(Canvas canvas, Path path, double progress, Paint paint) {
+  if (progress <= 0) return;
+  for (final metric in path.computeMetrics()) {
+    final length = metric.length * progress.clamp(0.0, 1.0);
+    if (length < paint.strokeWidth * 0.5) continue;
+    canvas.drawPath(metric.extractPath(0, length), paint);
+  }
+}
+
+/// A red X over the habit icon that looks scrawled with a marker: each of
+/// its two strokes is several overlapping, slightly bowed passes of varying
+/// width (the uneven, layered edges of a real marker line), cut through
+/// with thin dry-brush streaks, plus a thin flick off one side. The first
+/// stroke draws top-left to bottom-right, then the second top-right to
+/// bottom-left. It reaches a little past the icon, like a quick mark would.
+class _RedXPainter extends CustomPainter {
+  final double progress;
+
+  _RedXPainter({required this.progress});
+
+  static const _ink = Color(0xFFC8102E);
+
+  // One marker pass, in units of the icon size, measured across the stroke
+  // (perpendicular offsets at each end, how far it bows in the middle).
+  static const _passes = [
+    // (startOffset, endOffset, bow, width, opacity)
+    (-0.030, -0.020, 0.012, 0.085, 0.95),
+    (0.000, 0.012, -0.010, 0.100, 1.00),
+    (0.034, 0.030, 0.018, 0.065, 0.90),
+    (-0.012, 0.042, 0.004, 0.040, 0.85),
+  ];
+
+  // Thin flick running just off one edge of the stroke, slightly longer.
+  static const _flick = (0.068, 0.074, 0.022, 0.016, 0.90);
+
+  // Dry-brush gaps cut through the ink (perpendicular offsets).
+  static const _streaks = [-0.022, 0.010, 0.030];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (progress <= 0) return;
+    final s = size.shortestSide;
+    final p1 = (progress * 2).clamp(0.0, 1.0);
+    final p2 = (progress * 2 - 1).clamp(0.0, 1.0);
+
+    // Everything in one layer so the dry-brush streaks cut only the ink.
+    final bounds = (Offset.zero & size).inflate(s * 0.2);
+    canvas.saveLayer(bounds, Paint());
+    _stroke(canvas, s, Offset(size.width * 0.08, size.height * 0.10), Offset(size.width * 0.92, size.height * 0.90), p1);
+    _stroke(canvas, s, Offset(size.width * 0.90, size.height * 0.08), Offset(size.width * 0.10, size.height * 0.92), p2);
+    canvas.restore();
+  }
+
+  void _stroke(Canvas canvas, double s, Offset a, Offset b, double progress) {
+    if (progress <= 0) return;
+    final d = b - a;
+    final dir = d / d.distance;
+    final perp = Offset(-dir.dy, dir.dx);
+
+    Path pass(double os, double oe, double bow, {double overshoot = 0}) {
+      final start = a + perp * (os * s) - dir * (overshoot * s);
+      final end = b + perp * (oe * s) + dir * (overshoot * s);
+      final control = (start + end) / 2 + perp * (bow * s);
+      return Path()
+        ..moveTo(start.dx, start.dy)
+        ..quadraticBezierTo(control.dx, control.dy, end.dx, end.dy);
+    }
+
+    Paint ink(double width, double opacity) => Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = width * s
+      ..color = _ink.withValues(alpha: opacity);
+
+    for (final (os, oe, bow, width, opacity) in _passes) {
+      _drawPartialPath(canvas, pass(os, oe, bow), progress, ink(width, opacity));
+    }
+    final (fs, fe, fb, fw, fo) = _flick;
+    _drawPartialPath(canvas, pass(fs, fe, fb, overshoot: 0.04), progress, ink(fw, fo));
+
+    // Dry-brush streaks: thin gaps erased from the ink, kept off the ends.
+    for (final o in _streaks) {
+      final start = a + d * 0.12 + perp * (o * s);
+      final end = a + d * 0.88 + perp * (o * s * 1.2);
+      _drawPartialPath(
+        canvas,
+        Path()
+          ..moveTo(start.dx, start.dy)
+          ..lineTo(end.dx, end.dy),
+        progress,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = s * 0.007
+          ..blendMode = BlendMode.dstOut
+          ..color = Colors.black.withValues(alpha: 0.75),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_RedXPainter old) => old.progress != progress;
+}
+
+/// The "poof": a ring of soft smoke puffs bursting outward from where the
+/// NOPE button was, growing as they go and fading to nothing.
+class _PoofPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+
+  _PoofPainter({required this.progress, required this.color});
+
+  static const _count = 12;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = size.center(Offset.zero);
+    final r = size.shortestSide / 2;
+    final fade = 1 - progress;
+    for (var i = 0; i < _count; i++) {
+      // Alternate puffs travel a little further, so the ring looks ragged
+      // rather than perfectly even.
+      final reach = i.isEven ? 1.0 : 0.82;
+      final angle = i * 2 * math.pi / _count + 0.2;
+      final distance = r * (0.55 + 0.6 * reach * progress);
+      final puffRadius = r * (0.10 + 0.16 * progress) * (i.isEven ? 1.0 : 0.8);
+      final center = c + Offset(math.cos(angle), math.sin(angle)) * distance;
+      canvas.drawCircle(
+        center,
+        puffRadius,
+        Paint()
+          ..color = color.withValues(alpha: 0.35 * fade)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, puffRadius * 0.5),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PoofPainter old) => old.progress != progress || old.color != color;
+}
+
+/// A big, round-capped check mark in the habit's colour that draws itself
+/// in (short stroke, then the long one), over a soft glow of the same colour.
+class _CheckPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+
+  _CheckPainter({required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    final stroke = size.shortestSide * 0.12;
+    final path = Path()
+      ..moveTo(w * 0.22, h * 0.53)
+      ..lineTo(w * 0.42, h * 0.72)
+      ..lineTo(w * 0.80, h * 0.30);
+    Paint base() => Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = stroke;
+    _drawPartialPath(
+      canvas,
+      path,
+      progress,
+      base()
+        ..strokeWidth = stroke * 1.6
+        ..color = color.withValues(alpha: 0.35)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, stroke * 0.6),
+    );
+    _drawPartialPath(canvas, path, progress, base()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_CheckPainter old) => old.progress != progress || old.color != color;
+}
+
+/// Text heavier than the font's heaviest weight: Inter Black (900), plus a
+/// same-coloured stroke traced round every glyph to fatten its strokes.
+/// Letter-spacing is opened up by the stroke's width so the fattened letters
+/// keep the same gaps between them.
+class _ExtraHeavyText extends StatelessWidget {
+  final String text;
+  final Color color;
+  final double fontSize;
+
+  const _ExtraHeavyText(this.text, {required this.color, required this.fontSize});
+
+  @override
+  Widget build(BuildContext context) {
+    final stroke = fontSize * 0.035;
+    final base = TextStyle(
+      fontSize: fontSize,
+      fontWeight: FontWeight.w900,
+      // The title's -3% tracking, widened by the extra stroke.
+      letterSpacing: -0.03 * fontSize + stroke,
+      height: 1.0,
+    );
+    return Stack(
+      children: [
+        Text(
+          text,
+          style: base.copyWith(
+            foreground: Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = stroke
+              ..strokeJoin = StrokeJoin.round
+              ..color = color,
+          ),
+        ),
+        Text(text, style: base.copyWith(color: color)),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DONE-TODAY STACK
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The habits done today, gathered at the bottom of the home list.
+///
+/// Collapsed, it's an Apple Wallet-style pile: each done habit is a slim
+/// greyed pass, stacked so the ones behind show only their top row (icon +
+/// name) and the newest sits in front. Pull it up (or tap it) to fan it out
+/// into the full cards; tap the "Done today" label to fold it back.
+/// Dragging is only listened for while collapsed, so once open the cards
+/// scroll with the page normally.
+class _DoneStack extends StatefulWidget {
+  /// Oldest first; the newest is shown on top of the deck.
+  final List<Habit> habits;
+  final Widget Function(Habit) itemBuilder;
+
+  const _DoneStack({required this.habits, required this.itemBuilder});
+
+  @override
+  State<_DoneStack> createState() => _DoneStackState();
+}
+
+class _DoneStackState extends State<_DoneStack> {
+  bool _open = false;
+
+  static const _maxPasses = 4;
+  static const _passHeight = 64.0;
+  static const _passStep = 26.0; // how much of each pass behind shows
+
+  void _setOpen(bool open) {
+    if (open == _open) return;
+    HapticFeedback.selectionClick();
+    setState(() => _open = open);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    final newestFirst = widget.habits.reversed.toList();
+    final count = newestFirst.length;
+
+    final header = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _setOpen(!_open),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(4 * scale, 4 * scale, 4 * scale, 10 * scale),
+        child: Row(
+          children: [
+            Text(
+              "DONE TODAY",
+              style: TextStyle(fontSize: 11.5 * scale, fontWeight: FontWeight.w700, letterSpacing: 0.8, color: colors.ink.withValues(alpha: 0.45)),
+            ),
+            SizedBox(width: 6 * scale),
+            Text(
+              "$count",
+              style: TextStyle(fontSize: 11.5 * scale, fontWeight: FontWeight.w800, color: colors.ink.withValues(alpha: 0.7)),
+            ),
+            const Spacer(),
+            Text(
+                _open ? "Collapse" : "Show all",
+                style: TextStyle(fontSize: 12 * scale, fontWeight: FontWeight.w600, color: colors.ink.withValues(alpha: 0.5)),
+              ),
+          ],
+        ),
+      ),
+    );
+
+    final Widget body;
+    if (_open) {
+      body = Column(
+        key: const ValueKey('open'),
+        children: [for (final h in newestFirst) widget.itemBuilder(h)],
+      );
+    } else {
+      // Oldest visible pass at the back (top), newest in front (bottom).
+      final passes = newestFirst.take(_maxPasses).toList().reversed.toList();
+      final step = _passStep * scale;
+      final passHeight = _passHeight * scale;
+      body = GestureDetector(
+        key: const ValueKey('pile'),
+        behavior: HitTestBehavior.opaque,
+        // Pull up (or tap) to fan the pile out.
+        onVerticalDragEnd: (d) {
+          if ((d.primaryVelocity ?? 0) < -150) _setOpen(true);
+        },
+        onTap: () => _setOpen(true),
+        child: Column(
+          children: [
+            SizedBox(
+              height: passHeight + step * (passes.length - 1),
+              child: Stack(
+                children: [
+                  for (var i = 0; i < passes.length; i++)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: step * i,
+                      height: passHeight,
+                      child: _DonePass(habit: passes[i], height: passHeight),
+                    ),
+                ],
+              ),
+            ),
+            SizedBox(height: 8 * scale),
+            Text(
+              count > _maxPasses ? "Pull up to see all $count" : "Pull up to open",
+              style: TextStyle(fontSize: 11 * scale, fontWeight: FontWeight.w600, color: colors.ink.withValues(alpha: 0.4)),
+            ),
+            SizedBox(height: 6 * scale),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        header,
+        AnimatedSize(
+          duration: const Duration(milliseconds: 380),
+          curve: Curves.easeInOutCubic,
+          alignment: Alignment.topCenter,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 260),
+            child: body,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One done habit as a slim, greyed "pass" in the collapsed done pile. Its
+/// icon and name sit in the top row, the part that stays visible when
+/// other passes are stacked in front of it.
+class _DonePass extends StatelessWidget {
+  final Habit habit;
+  final double height;
+
+  const _DonePass({required this.habit, required this.height});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    final muted = Color.lerp(Color(habit.colorValue), colors.ink, 0.55)!.withValues(alpha: 0.75);
+    return Glass(
+      shape: glassRounded(20),
+      tint: Color(habit.colorValue),
+      tintStrength: 0.08,
+      // Solidly frosted, so the passes stacked behind don't show through;
+      // no backdrop blur, since overlapping blurs don't layer cleanly.
+      frost: 1,
+      blur: 0,
+      shadows: [
+        BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 12, offset: const Offset(0, -2)),
+      ],
+      padding: EdgeInsets.fromLTRB(14 * scale, 7 * scale, 14 * scale, 0),
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: Row(
+          children: [
+            Icon(habitIconForCodePoint(habit.iconCodePoint), size: 17 * scale, color: muted),
+            SizedBox(width: 8 * scale),
+            Expanded(
+              child: Text(
+                habit.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13.5 * scale, fontWeight: FontWeight.w700, color: colors.ink.withValues(alpha: 0.6)),
+              ),
+            ),
+            Icon(Icons.check_rounded, size: 17 * scale, color: muted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown above the done stack once every habit has been resisted today.
+class _AllDoneCard extends StatelessWidget {
+  final int count;
+  const _AllDoneCard({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final scale = tabletScale(context);
+    return Glass(
+      shape: glassRounded(26),
+      tint: const Color(0xFF3FB27F),
+      tintStrength: 0.22,
+      padding: EdgeInsets.symmetric(horizontal: 22 * scale, vertical: 22 * scale),
+      child: Column(
+        children: [
+          Text("🎉", style: TextStyle(fontSize: 34 * scale)),
+          SizedBox(height: 8 * scale),
+          Text(
+            "All clear for today",
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 20 * scale, fontWeight: FontWeight.w800, letterSpacing: -0.4, color: colors.ink),
+          ),
+          SizedBox(height: 6 * scale),
+          Text(
+            count == 1
+                ? "You resisted your habit today. See you tomorrow."
+                : "You resisted all $count of your habits today. See you tomorrow.",
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14 * scale, height: 1.35, color: colors.ink.withValues(alpha: 0.7)),
+          ),
+        ],
       ),
     );
   }
@@ -3418,22 +4323,18 @@ class _CalendarViewState extends State<CalendarView> {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final scale = tabletScale(context);
-    return Scaffold(
-      backgroundColor: colors.bg,
-      appBar: AppBar(
-        backgroundColor: colors.bg,
-        elevation: 0,
-        toolbarHeight: kToolbarHeight * scale,
-        iconTheme: IconThemeData(size: 24 * scale),
-        title: Text(
-          "Calendar",
-          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -0.5, fontSize: 20 * scale),
-        ),
-      ),
+    return GlassBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: glassAppBar(context, title: "Calendar"),
       body: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(16 * scale, 8 * scale, 16 * scale, 24 * scale),
         child: Column(
         children: [
-          TableCalendar(
+          Glass(
+            shape: glassRounded(28),
+            padding: EdgeInsets.fromLTRB(8 * scale, 4 * scale, 8 * scale, 12 * scale),
+            child: TableCalendar(
             firstDay: DateTime.utc(2023, 1, 1),
             lastDay: DateTime.now().add(const Duration(days: 365)),
             focusedDay: _focusedDay,
@@ -3513,10 +4414,12 @@ class _CalendarViewState extends State<CalendarView> {
               },
             ),
           ),
+          ),
           const SizedBox(height: 16),
           if (_selectedDay != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
+            Glass(
+              shape: glassRounded(24),
+              padding: EdgeInsets.fromLTRB(20 * scale, 18 * scale, 20 * scale, 12 * scale),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -3573,6 +4476,7 @@ class _CalendarViewState extends State<CalendarView> {
         ],
         ),
       ),
+      ),
     );
   }
 }
@@ -3596,9 +4500,9 @@ class _EmptyState extends StatelessWidget {
               "nope.",
               style: TextStyle(
                 fontSize: 56,
-                fontWeight: FontWeight.w900,
+                fontWeight: FontWeight.w800,
                 color: colors.ink.withValues(alpha: 0.12),
-                letterSpacing: -3,
+                letterSpacing: -1.7,
               ),
             ),
             const SizedBox(height: 16),
