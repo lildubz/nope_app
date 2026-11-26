@@ -20,11 +20,12 @@ import 'glass.dart';
 
 void main() {
   // DevicePreview is a dev-only phone-frame simulator (device sizes, dark
-  // mode, text scaling). With enabled: false it just calls builder, so
-  // release builds pay nothing for it.
+  // mode, text scaling), only useful when running in a browser -- on a real
+  // device or the iOS simulator the app should fill the screen. With
+  // enabled: false it just calls builder, so it costs nothing elsewhere.
   runApp(
     DevicePreview(
-      enabled: !kReleaseMode,
+      enabled: kIsWeb && !kReleaseMode,
       // The app's own dark canvas instead of DevicePreview's default white,
       // so the liquid-glass UI is judged against the colour it ships on.
       backgroundColor: kGlassBaseDark,
@@ -633,6 +634,9 @@ PreferredSizeWidget glassAppBar(BuildContext context, {String? title}) {
   final scale = tabletScale(context);
   final canPop = Navigator.of(context).canPop();
   return AppBar(
+    // AppBar hard-clips by default, which slices the glass buttons' drop
+    // shadows off in a straight line at the bar's bottom edge.
+    clipBehavior: Clip.none,
     automaticallyImplyLeading: false,
     toolbarHeight: (kToolbarHeight + 8) * scale,
     leadingWidth: 68 * scale,
@@ -2460,6 +2464,9 @@ class _NopeHomeState extends State<NopeHome> with TickerProviderStateMixin {
       child: Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(
+        // Don't clip: lets the glass buttons' shadows fade out naturally
+        // instead of ending in a visible line at the bar's bottom edge.
+        clipBehavior: Clip.none,
         titleSpacing: 24,
         toolbarHeight: (kToolbarHeight + 8) * scale,
         title: Text(
@@ -3732,7 +3739,13 @@ class _NopeButtonState extends State<_NopeButton> {
                     child: Center(
                       child: FittedBox(
                         fit: BoxFit.scaleDown,
-                        child: _ExtraHeavyText("nope.", color: colors.ink, fontSize: 40 * scale),
+                        // Soft off-black in light mode (pure ink reads harsh
+                        // at this weight); white in dark mode.
+                        child: _ExtraHeavyText(
+                          "nope.",
+                          color: isDark ? colors.ink : const Color(0xFF2B2B30),
+                          fontSize: 40 * scale,
+                        ),
                       ),
                     ),
                   ),
